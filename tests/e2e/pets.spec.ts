@@ -396,3 +396,92 @@ test("a signed-in user's personality is persisted and reaches the chat companion
     "sleepy",
   );
 });
+
+test("the reaction demo renders and a button changes the pet state", async ({ page }) => {
+  await page.goto("/pets");
+  const demo = page.getByRole("group", { name: "Reaction demo" });
+
+  await expect(demo).toBeVisible();
+  await expect(demo.getByRole("button", { name: "User Message" })).toBeVisible();
+  await expect(demo.getByRole("button", { name: "Response Error" })).toBeVisible();
+  await expect(demo.getByRole("button", { name: "Reset" })).toBeVisible();
+
+  await expect(renderer(page)).toHaveAttribute("data-state", "idle");
+
+  await demo.getByRole("button", { name: "Start Thinking" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "thinking");
+  // The note names the event and the state it produced, so the mapping is visible.
+  await expect(demo.locator(".pets-reaction-note")).toContainText("Start Thinking → Thinking");
+
+  await demo.getByRole("button", { name: "Reset" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "idle");
+});
+
+test("a temporary reaction settles back to idle on its own", async ({ page }) => {
+  await page.goto("/pets");
+  const demo = page.getByRole("group", { name: "Reaction demo" });
+
+  await demo.getByRole("button", { name: "Response Complete" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "happy");
+
+  // No further click: the controller's own timer settles the pet.
+  await expect(renderer(page)).toHaveAttribute("data-state", "idle", { timeout: 5_000 });
+});
+
+test("different personalities react differently to the same event", async ({ page }) => {
+  await page.goto("/pets");
+  const demo = page.getByRole("group", { name: "Reaction demo" });
+
+  // The cat, calm by default, is merely pleased.
+  await demo.getByRole("button", { name: "Response Complete" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "happy");
+
+  // The fox with the playful personality cannot sit still.
+  await page.getByRole("button", { name: /Ember/ }).click();
+  await page
+    .getByRole("group", { name: "Choose a personality" })
+    .getByRole("button", { name: "Playful" })
+    .click();
+
+  await demo.getByRole("button", { name: "Response Complete" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "excited");
+});
+
+test("reaction controls work from the keyboard", async ({ page }) => {
+  await page.goto("/pets");
+  const demo = page.getByRole("group", { name: "Reaction demo" });
+
+  await demo.getByRole("button", { name: "Response Error" }).focus();
+  await page.keyboard.press("Enter");
+
+  await expect(renderer(page)).toHaveAttribute("data-state", "sad");
+  await expect(renderer(page)).toHaveClass(/pet-pose-sad/);
+});
+
+test("reactions still change state under reduced motion", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/pets");
+  const demo = page.getByRole("group", { name: "Reaction demo" });
+
+  // The state change and the pose still arrive; only the CSS movement is suppressed.
+  await demo.getByRole("button", { name: "Start Thinking" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "thinking");
+  await expect(renderer(page)).toHaveClass(/pet-pose-thinking/);
+
+  // And a temporary reaction still settles, so nothing depends on motion.
+  await demo.getByRole("button", { name: "Response Complete" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "happy");
+  await expect(renderer(page)).toHaveAttribute("data-state", "idle", { timeout: 5_000 });
+});
+
+test("the reaction demo keeps the mobile layout intact", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto("/pets");
+
+  await expect(page.getByRole("group", { name: "Reaction demo" })).toBeVisible();
+  const dims = await page.evaluate(() => ({
+    width: document.documentElement.scrollWidth,
+    viewport: window.innerWidth,
+  }));
+  expect(dims.width).toBeLessThanOrEqual(dims.viewport);
+});

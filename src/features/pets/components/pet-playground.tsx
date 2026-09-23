@@ -15,7 +15,12 @@ import {
   requestPetPersonality,
   requestPetSelection,
 } from "../client";
-import { INITIAL_PET_STATE, PET_STATES, PET_STATE_LABELS, type PetState } from "../state";
+import {
+  PET_REACTION_EVENT_LABELS,
+  type PetReactionEvent,
+} from "../reactions";
+import { PET_STATES, PET_STATE_LABELS } from "../state";
+import { usePetBehavior } from "../use-pet-behavior";
 import {
   DEFAULT_PET_SIZE,
   PET_SIZES,
@@ -38,6 +43,19 @@ type Props = {
 };
 
 /**
+ * The events the demo can fire. A deliberate subset of the vocabulary: enough to show
+ * a positive, a negative, an in-progress, and a cancel reaction without turning the
+ * playground into an event browser.
+ */
+const REACTION_DEMO_EVENTS: readonly PetReactionEvent[] = [
+  "user-started-message",
+  "thinking",
+  "response-completed",
+  "response-error",
+  "cancelled",
+];
+
+/**
  * The `/pets` playground: pick a pet, a look, a personality, a mood, and a size.
  *
  * State and size are always local demo controls. The *pet*, its *appearance*, and its
@@ -50,6 +68,12 @@ type Props = {
  * The appearance and personality controls list only what the selected pet offers, so
  * switching pets silently resolves a choice the new pet does not have back to its own
  * default rather than leaving an invalid selection on screen.
+ *
+ * A **Reaction demo** group fires synthetic application events at the behavior
+ * controller (`usePetBehavior`) so the personality-aware mapping is visible: the same
+ * event on a different personality can resolve to a different state, and the note under
+ * the buttons states exactly which event produced which state. Nothing here is
+ * persisted, and nothing is connected to chat, streaming, or the AI.
  *
  * The controls are ordinary buttons (keyboard operable, `aria-pressed`). The mood
  * caption and the personality line are plain text and **not** live regions, so
@@ -73,7 +97,6 @@ export function PetPlayground({
   const [personalityId, setPersonalityId] = useState<string>(
     () => resolvePersonalityForPet(first, initialPersonalityId).id,
   );
-  const [state, setState] = useState<PetState>(INITIAL_PET_STATE);
   const [size, setSize] = useState<PetSize>(DEFAULT_PET_SIZE);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +107,13 @@ export function PetPlayground({
   const appearances = listAppearancesForPet(pet.id);
   const personality = resolvePersonalityForPet(pet.id, personalityId);
   const personalities = listPersonalitiesForPet(pet.id);
-  const treatment = petTreatment(state);
+
+  // The behavior controller is the single source of the rendered state: reactions
+  // dispatch into it, and the manual state controls pin a state through it. That keeps
+  // one state prop flowing to the renderer and no behavior logic inside it — and it
+  // means switching pet or personality settles the pet with no extra bookkeeping.
+  const behavior = usePetBehavior({ pet: pet.id, personality: personality.id });
+  const treatment = petTreatment(behavior.state);
 
   const choosePet = async (id: string) => {
     if (id === petId || saving) return;
@@ -190,11 +219,11 @@ export function PetPlayground({
           pet={pet}
           appearance={appearance.id}
           personality={personality.id}
-          state={state}
+          state={behavior.state}
           size={size}
         />
         <p className="pets-caption">
-          <strong>{pet.name}</strong> is {PET_STATE_LABELS[state].toLowerCase()} —{" "}
+          <strong>{pet.name}</strong> is {PET_STATE_LABELS[behavior.state].toLowerCase()} —{" "}
           {treatment.caption}
         </p>
         <p className="pets-description">{pet.description}</p>
@@ -271,8 +300,8 @@ export function PetPlayground({
                 key={option}
                 type="button"
                 className="pets-choice"
-                aria-pressed={option === state}
-                onClick={() => setState(option)}
+                aria-pressed={option === behavior.state}
+                onClick={() => behavior.holdState(option)}
               >
                 {PET_STATE_LABELS[option]}
               </button>
@@ -295,6 +324,32 @@ export function PetPlayground({
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="pets-control-group" role="group" aria-label="Reaction demo">
+          <span className="pets-control-label">Reaction demo</span>
+          <div className="pets-button-row">
+            {REACTION_DEMO_EVENTS.map((event) => (
+              <button
+                key={event}
+                type="button"
+                className="pets-choice"
+                onClick={() => behavior.dispatch(event)}
+              >
+                <span className="pets-choice-name">{PET_REACTION_EVENT_LABELS[event]}</span>
+              </button>
+            ))}
+            <button type="button" className="pets-choice" onClick={() => behavior.reset()}>
+              <span className="pets-choice-name">Reset</span>
+            </button>
+          </div>
+          {/* Plain text, not a live region: the mapping is shown so it is obvious that
+              the same event always produces the same state for this personality. */}
+          <p className="pets-reaction-note">
+            {behavior.lastEvent
+              ? `${PET_REACTION_EVENT_LABELS[behavior.lastEvent]} → ${PET_STATE_LABELS[behavior.state]}`
+              : "Dispatch an event to see how this pet reacts."}
+          </p>
         </div>
 
         <p className={`settings-hint ${error ? "is-error" : ""}`} role={error ? "alert" : undefined}>

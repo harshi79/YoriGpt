@@ -8,8 +8,9 @@ server-side provider streams a reply for a stored user message over server-sent
 events while the browser renders it, and the finished answer is stored; several
 OpenRouter keys rotate with a short cooldown when one is refused or rate limited,
 and now a foundational **interactive 2D pet framework** with a development
-playground with **persistent per-account pet selection** — while pet personalities,
-reactions, and other settings still do not exist. The home route is an original
+playground, **persistent per-account pet selection**, persistent personalities, and a
+deterministic local reaction engine — while chat-driven reactions and other settings
+still do not exist. The home route is an original
 charcoal-and-mint interface — with a light palette behind the theme preference —
 ready for later service integration. The chat shell
 stays usable for signed-out visitors, but conversations belong to an authenticated
@@ -501,17 +502,19 @@ preference columns of the same row keep their values.
 **Scope.** The persisted settings are the theme and the pet companion (its selection,
 appearance, and personality). Account editing, password or email changes, account
 deletion, billing, and usage tracking do not exist and are not stubbed. Pet
-*personalities* exist as catalog-defined behavior metadata only: they are stored and
-displayed, but drive no animation, no chat reaction, and no AI behavior. Reactions are
-not implemented (see the next section).
+*personalities* are catalog-defined behavior metadata: they are stored, displayed, and
+now drive a small **local, deterministic** reaction engine. That engine is not connected
+to OpenRouter, streaming, or real chat events, and it produces no AI behavior, no
+dialogue, and no system prompt (see the next section).
 
 ## Pet framework
 
 A small, reusable foundation for interactive 2D companions, kept entirely inside
 `src/features/pets/` (plus a thin server preference service) so chat components never
 hold pet logic. It is deliberately a *framework*: types, catalog, state vocabulary, a
-renderer, lightweight CSS animations, and a persisted per-account selection,
-appearance, and personality — no AI connection, no finished artwork, and no reactions.
+renderer, lightweight CSS animations, a persisted per-account selection, appearance,
+and personality, and a deterministic local reaction engine — no AI connection, no
+finished artwork, and nothing wired to chat yet.
 
 - **Architecture.** `types.ts` declares the domain (`id`, `name`, `species`,
   `description`, `defaultPersonality`, `available`, an abstract `asset` reference, a
@@ -556,8 +559,27 @@ appearance, and personality — no AI connection, no finished artwork, and no re
   (Yori: calm/sleepy/curious, Ember: curious/playful, Pip: playful/sleepy but never
   selectable). `isSelectablePersonality` allows an id only for an available pet that
   lists it, and `resolvePersonalityForPet` maps a missing, unknown, or other-pet id
-  back to that pet's default. **Nothing consumes personalities yet**: no
-  personality-specific animation, no chat reaction, no system prompt.
+  back to that pet's default. Personalities now drive the local reaction engine below;
+  they still produce no AI behavior, no dialogue, and no system prompt.
+- **Behavior & reactions.** `reactions.ts` is a pure engine: it takes a pet, a
+  personality, an application event, and the current state, and returns one of the six
+  **existing** states plus an optional settle duration. No React, no timers, no network,
+  no database, no AI — the same inputs always give the same output, which is what makes
+  it testable with synthetic events. The vocabulary is deliberately small: `idle`,
+  `user-started-message`, `thinking`, `response-started`, `response-completed`,
+  `response-error`, `cancelled`, `successful-action`. Only two personality rules exist,
+  both reading hints the catalog already declares — `motionLevel: "high"` turns a
+  positive reaction into `excited` where a calmer pet manages `happy`, and
+  `restingState: "sleeping"` keeps a drowsy pet dozing through `response-started`.
+  Where no existing state is an exact match the closest one is used and documented in
+  the mapping (`response-started` → `thinking`, since there is no "attentive" state).
+  `use-pet-behavior.ts` is the client-side controller that owns the only mutable parts:
+  the current state, a **single** settle timer, and an unmount guard. State is derived
+  rather than synced — a reaction is stored with the pet and personality that produced
+  it, so changing either settles the pet with no effect and no stale value. Nothing is
+  persisted: mood, temporary state, and reaction history never reach the database.
+  `CHAT_PHASE_REACTIONS` maps a future chat lifecycle onto the same vocabulary and is
+  wired to nothing.
 - **Renderer.** `<PetRenderer pet appearance personality state size className label />`
   renders any catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name
   (`role="img"`, e.g. "Yori, a cat"), marks the drawing `aria-hidden`, and carries the
@@ -616,7 +638,11 @@ appearance, and personality — no AI connection, no finished artwork, and no re
   saves it optimistically (drawn immediately, confirmed by the server, rolled back with
   a short note on failure — no spinner); reloading keeps all three. An anonymous visitor
   gets the full playground but the choices stay in the tab and never touch the database.
-  Mood and size remain local demo controls for everyone and are never persisted.
+  A small **Reaction demo** dispatches the synthetic events (`User Message`,
+  `Start Thinking`, `Response Complete`, `Response Error`, `Cancel`) straight into the
+  local behavior engine so the personality mapping and the settle timing are visible;
+  mood and size stay manual controls. Both paths write nothing at runtime — mood,
+  temporary state, and reaction history are never persisted.
 - **Chat integration.** The empty-state companion beside the welcome mark is the
   signed-in user's stored pet, appearance, and personality (the catalog defaults for
   anonymous visitors), loaded server-side and passed down as props — the chat stores
@@ -685,7 +711,7 @@ assets or external font requests are used.
 
 ## Verification and tooling limitations
 
-The project passes `npm install`, lint, typecheck, **319 unit tests**, **63 Chromium
+The project passes `npm install`, lint, typecheck, **432 unit tests**, **71 Chromium
 browser tests**, and production build/start without real secrets, SMTP credentials,
 or a live database after client generation. **87 database checks** (13 streaming reply
 + 16 reply + 9 message + 13 conversation + 9 settings + 6 pets + 9 model preference + 9 auth + 3 structure)
@@ -744,7 +770,13 @@ renderer's accessible label, size variants, `data-state`/`data-motion` attribute
 labelled placeholder for an unavailable or malformed pet, plus the pet preference
 service's default/invalid/unavailable/per-user resolution, the `/api/settings/pet`
 route's auth, origin, and strict-body handling, and the selection client's payload and
-error mapping). The browser suite drives the selector end to end: the catalog it
+error mapping), and the local reaction engine (every event's deterministic mapping,
+repeated calls returning identical results, the personality-driven differences and the
+events that stay identical on purpose, missing and invalid pet/personality input falling
+back without throwing, `idle` holding, an error reaction never being positive, a
+cancelled reaction staying safe, the unwired chat-phase seam, and the behavior
+controller's dispatch, settle-to-idle, reset, per-pet and per-personality resolution
+with no stale reaction, and a settle timer that cannot fire after unmount). The browser suite drives the selector end to end: the catalog it
 lists, a stored choice surviving a reload and a second conversation, the identifier
 the stub receives for the default and for two other selections (including a streamed
 rotation), two accounts keeping separate choices, and a raw provider identifier
@@ -758,7 +790,10 @@ the available pets it offers and the unavailable one it hides, selecting a pet
 changing the renderer, switching state and size changing the renderer, keyboard
 operation of the controls, reduced motion removing the movement while the pose
 remains, a signed-in user's choice persisting across a reload, an anonymous choice
-staying local and never reaching the database, and the chat empty-state companion
+staying local and never reaching the database, the reaction demo changing the pose for
+each synthetic event and settling back to idle while a high-motion personality reacts
+more strongly than a calm one, that demo working from the keyboard and under reduced
+motion, and the chat empty-state companion
 following the stored pet without breaking a narrow layout.
 No AI check reaches the network: the provider contract is covered by unit tests with a
 mocked `fetch`, the reply service and database suites mock the adapter module, and the

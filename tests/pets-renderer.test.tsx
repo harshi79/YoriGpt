@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PetRenderer } from "../src/features/pets/components/pet-renderer";
 import { findPet, resolvePet } from "../src/features/pets/catalog";
 import { petTreatment } from "../src/features/pets/animations";
+import { resolveReaction } from "../src/features/pets/reactions";
 import type { PetDefinition } from "../src/features/pets/types";
 
 const yori = resolvePet("yori-cat");
@@ -113,5 +114,23 @@ describe("the pet renderer", () => {
     const html = render(yori, { personality: "curious" });
     expect(html).toContain('aria-label="Yori, a cat"');
     expect(html.match(/role="img"/g)?.length).toBe(1);
+  });
+
+  it("renders a state produced by the reaction engine, unchanged", () => {
+    // The engine resolves; the renderer only draws. Whatever state comes out must
+    // arrive on the markup as that state, with the matching pose — no behavior logic
+    // lives here.
+    const reaction = resolveReaction({
+      pet: "ember-fox",
+      personality: "playful",
+      event: "response-completed",
+    });
+    const fox = resolvePet("ember-fox");
+
+    const html = render(fox, { state: reaction.state, personality: "playful" });
+    expect(html).toContain(`data-state="${reaction.state}"`);
+    expect(html).toContain(petTreatment(reaction.state).poseClass);
+    // The accessible label still does not mention the state.
+    expect(html).toContain('aria-label="Ember, a fox"');
   });
 });
