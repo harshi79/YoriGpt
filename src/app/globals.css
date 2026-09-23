@@ -600,6 +600,12 @@ svg {
   gap: 12px;
   min-width: 0;
 }
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
 .model-control {
   min-width: 0;
 }
@@ -1264,6 +1270,13 @@ svg {
     padding: 4px 7px;
     font-size: 9px;
   }
+  .header-right {
+    gap: 8px;
+  }
+  .chat-companion {
+    width: 32px;
+    height: 32px;
+  }
   .sidebar {
     padding-top: max(22px, env(safe-area-inset-top));
     padding-bottom: max(16px, env(safe-area-inset-bottom));
@@ -1371,6 +1384,10 @@ svg {
 @media (max-width: 359px) {
   .preview-badge {
     display: none;
+  }
+  .chat-companion {
+    width: 28px;
+    height: 28px;
   }
   .empty-state {
     padding-inline: 16px;
@@ -2271,6 +2288,15 @@ svg {
   margin-bottom: 0;
 }
 .welcome-pet {
+  opacity: 0.92;
+}
+/* The companion in the chat header. Declared after the renderer's size variants so
+   the chat can keep `size="sm"` and still ask for a smaller footprint: it sits beside
+   a badge in a 91px header, so it stays out of the way of the model control. */
+.chat-companion {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
   opacity: 0.92;
 }
 @media (max-width: 767px) {

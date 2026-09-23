@@ -15,6 +15,11 @@ import { isPetPersonality, type PetPersonalityDefinition } from "./types";
  * It deliberately reuses the existing state vocabulary from `state.ts` rather than
  * inventing a second one: where an event has no exact match, the closest existing state
  * is used and the choice is written down in the mapping below.
+ *
+ * The chat lifecycle reaches this engine through `CHAT_PHASE_REACTIONS` below, via the
+ * small adapter in `features/chat/pet-reactions.ts`. That is the only caller with real
+ * events behind it, and it changes nothing here: no OpenRouter, no prompt, no request,
+ * and no natural language enters this module from either direction.
  */
 
 /**
@@ -180,11 +185,12 @@ export function resolveReaction(context: PetReactionContext): PetReaction {
 }
 
 /**
- * The chat lifecycle a future task can dispatch from, mapped onto the vocabulary above.
+ * The chat lifecycle, mapped onto the vocabulary above.
  *
- * Deliberately **not wired to anything**: no composer, stream, or message code imports
- * this yet, and nothing here makes a request. It exists so the next task can turn real
- * chat events into reactions by name instead of inventing a second vocabulary.
+ * Consumed by the adapter in `features/chat/pet-reactions.ts`, which the chat shell
+ * reports real stream phases to. The mapping itself stays here so the names a chat
+ * phase resolves to live next to the events they produce, and so no second vocabulary
+ * can grow on the chat side. Nothing in this module makes a request or reads a stream.
  */
 export const CHAT_PHASE_REACTIONS = {
   "composer-submit": "user-started-message",

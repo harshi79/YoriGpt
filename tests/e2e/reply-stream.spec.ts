@@ -309,3 +309,53 @@ test("a signed-out visitor cannot start or read a reply stream", async ({ page }
   await page.goto(`/chat/${conversationId}`);
   await expect(page).toHaveURL(/\/login$/);
 });
+
+test("the chat companion reacts to the real stream phases and settles again", async ({ page }) => {
+  await signUp(page, "petstream");
+  await openNewConversation(page);
+
+  const companion = page.locator(".chat-companion");
+  // The companion is part of an open conversation, and it starts at rest.
+  await expect(companion).toBeVisible();
+  await expect(companion).toHaveAttribute("data-state", "idle");
+
+  // Record every state the companion actually shows, so the sequence is read back
+  // from what the browser rendered instead of being raced against the stream.
+  await page.evaluate(() => {
+    const holder = window as unknown as { __petStates?: string[] };
+    holder.__petStates = [];
+    const record = () => {
+      const state = document.querySelector(".chat-companion")?.getAttribute("data-state");
+      const previous = holder.__petStates?.[(holder.__petStates?.length ?? 1) - 1];
+      if (state && state !== previous) holder.__petStates?.push(state);
+    };
+    new MutationObserver(record).observe(document.body, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-state"],
+    });
+    record();
+  });
+
+  // The stub pauses after its first delta for this text, so generation is observably
+  // in progress rather than over before an assertion can look at it.
+  await send(page, "[slow] Explain streaming");
+
+  await expect(companion).toHaveAttribute("data-state", "thinking");
+  await expect(page.getByText("Generating a reply…")).toBeVisible();
+
+  await expect(storedAssistantMessages(page)).toHaveCount(1, { timeout: 15_000 });
+
+  // A completed reply is a positive reaction for the default calm companion, and it
+  // settles back on its own: nothing about it is persisted or announced.
+  await expect(companion).toHaveAttribute("data-state", "happy");
+  await expect(companion).toHaveAttribute("data-state", "idle", { timeout: 10_000 });
+
+  const states = await page.evaluate(() => {
+    const holder = window as unknown as { __petStates?: string[] };
+    return holder.__petStates ?? [];
+  });
+  expect(states).toContain("thinking");
+  expect(states).toContain("happy");
+  expect(states[states.length - 1]).toBe("idle");
+});

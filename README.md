@@ -9,8 +9,8 @@ events while the browser renders it, and the finished answer is stored; several
 OpenRouter keys rotate with a short cooldown when one is refused or rate limited,
 and now a foundational **interactive 2D pet framework** with a development
 playground, **persistent per-account pet selection**, persistent personalities, and a
-deterministic local reaction engine — while chat-driven reactions and other settings
-still do not exist. The home route is an original
+deterministic local reaction engine that follows the real chat lifecycle — while
+other settings still do not exist. The home route is an original
 charcoal-and-mint interface — with a light palette behind the theme preference —
 ready for later service integration. The chat shell
 stays usable for signed-out visitors, but conversations belong to an authenticated
@@ -503,8 +503,8 @@ preference columns of the same row keep their values.
 appearance, and personality). Account editing, password or email changes, account
 deletion, billing, and usage tracking do not exist and are not stubbed. Pet
 *personalities* are catalog-defined behavior metadata: they are stored, displayed, and
-now drive a small **local, deterministic** reaction engine. That engine is not connected
-to OpenRouter, streaming, or real chat events, and it produces no AI behavior, no
+drive a small **local, deterministic** reaction engine. That engine now follows the real
+chat lifecycle, but it is not connected to OpenRouter and produces no AI behavior, no
 dialogue, and no system prompt (see the next section).
 
 ## Pet framework
@@ -513,8 +513,8 @@ A small, reusable foundation for interactive 2D companions, kept entirely inside
 `src/features/pets/` (plus a thin server preference service) so chat components never
 hold pet logic. It is deliberately a *framework*: types, catalog, state vocabulary, a
 renderer, lightweight CSS animations, a persisted per-account selection, appearance,
-and personality, and a deterministic local reaction engine — no AI connection, no
-finished artwork, and nothing wired to chat yet.
+and personality, and a deterministic local reaction engine that follows the chat
+lifecycle — no AI connection and no finished artwork.
 
 - **Architecture.** `types.ts` declares the domain (`id`, `name`, `species`,
   `description`, `defaultPersonality`, `available`, an abstract `asset` reference, a
@@ -578,8 +578,21 @@ finished artwork, and nothing wired to chat yet.
   rather than synced — a reaction is stored with the pet and personality that produced
   it, so changing either settles the pet with no effect and no stale value. Nothing is
   persisted: mood, temporary state, and reaction history never reach the database.
-  `CHAT_PHASE_REACTIONS` maps a future chat lifecycle onto the same vocabulary and is
-  wired to nothing.
+  `CHAT_PHASE_REACTIONS` maps the chat lifecycle onto the same vocabulary, so neither
+  side grows a second event system.
+- **Chat reactions.** `features/chat/pet-reactions.ts` is the only bridge between the
+  two. The shell reports what actually happened — a message was stored, a reply request
+  was issued, the first provider text arrived, and then exactly one outcome — and the
+  adapter turns each report into one event from the vocabulary above. A reporter is
+  created per generation, which is what keeps one reply to one coherent sequence: the
+  first-content event is reported once however many deltas arrive, and once an outcome
+  has been reported no other can follow, so a cancelled or failed generation can never
+  be celebrated by a late callback. A stream replaced by a retry or by navigation
+  reports nothing at all, and a message the server refused never reports anything. The
+  companion is drawn in the chat header while a conversation is open — never beside the
+  welcome mark, so a page carries exactly one accessible pet name — and it is not a live
+  region, so reactions are seen and never announced. None of it is persisted, and none
+  of it reaches a provider request, a prompt, or the database.
 - **Renderer.** `<PetRenderer pet appearance personality state size className label />`
   renders any catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name
   (`role="img"`, e.g. "Yori, a cat"), marks the drawing `aria-hidden`, and carries the
@@ -647,8 +660,10 @@ finished artwork, and nothing wired to chat yet.
   signed-in user's stored pet, appearance, and personality (the catalog defaults for
   anonymous visitors), loaded server-side and passed down as props — the chat stores
   nothing pet-related itself. The personality is carried as data only: it alters no
-  message, is never sent to OpenRouter, and is never turned into a system prompt. It is
-  not connected to messages, replies, streaming, model selection, or sentiment.
+  message, is never sent to OpenRouter, and is never turned into a system prompt. While
+  a conversation is open the same companion also appears in the header and reacts to the
+  real reply lifecycle; it is still connected to no model selection, sentiment, or
+  provider detail, and its runtime state is never stored.
 
 ## Architecture
 
@@ -711,7 +726,7 @@ assets or external font requests are used.
 
 ## Verification and tooling limitations
 
-The project passes `npm install`, lint, typecheck, **432 unit tests**, **71 Chromium
+The project passes `npm install`, lint, typecheck, **452 unit tests**, **72 Chromium
 browser tests**, and production build/start without real secrets, SMTP credentials,
 or a live database after client generation. **87 database checks** (13 streaming reply
 + 16 reply + 9 message + 13 conversation + 9 settings + 6 pets + 9 model preference + 9 auth + 3 structure)
@@ -774,9 +789,20 @@ error mapping), and the local reaction engine (every event's deterministic mappi
 repeated calls returning identical results, the personality-driven differences and the
 events that stay identical on purpose, missing and invalid pet/personality input falling
 back without throwing, `idle` holding, an error reaction never being positive, a
-cancelled reaction staying safe, the unwired chat-phase seam, and the behavior
+cancelled reaction staying safe, the chat-phase seam, and the behavior
 controller's dispatch, settle-to-idle, reset, per-pet and per-personality resolution
-with no stale reaction, and a settle timer that cannot fire after unmount). The browser suite drives the selector end to end: the catalog it
+with no stale reaction, and a settle timer that cannot fire after unmount), and the
+chat integration (each lifecycle moment producing its documented event, a reporter
+reusing the existing phase mapping and emitting nothing outside the vocabulary, the
+first-content event reported once for many deltas, a completed, failed, or cancelled
+generation unable to report a second outcome, and guards scoped to one generation
+rather than to the caller). The same wiring is covered against the real shell in jsdom:
+the companion appearing only for an open conversation, `thinking` once the reply request
+is genuinely issued, the first delta reaching the renderer, a completed stream
+celebrating and settling, an error showing `sad`, a cancellation settling rather than
+sulking (and a dozing companion staying asleep through it, per the engine's documented
+rule), a refused message reporting nothing at all, a personality change mid-generation
+carrying no stale reaction, and the composer's own error display left intact. The browser suite drives the selector end to end: the catalog it
 lists, a stored choice surviving a reload and a second conversation, the identifier
 the stub receives for the default and for two other selections (including a streamed
 rotation), two accounts keeping separate choices, and a raw provider identifier

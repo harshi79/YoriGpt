@@ -11,6 +11,10 @@ import { ConversationView } from "../chat/conversation-view";
 import { Icon } from "../ui/icon";
 import { IconButton } from "../ui/icon-button";
 import { sampleConversation } from "../../features/chat/presentation";
+import { createChatPetReactions, type ChatPetReactions } from "../../features/chat/pet-reactions";
+import { resolvePet } from "../../features/pets/catalog";
+import { PetRenderer } from "../../features/pets/components/pet-renderer";
+import { usePetBehavior } from "../../features/pets/use-pet-behavior";
 import type { ModelSelection } from "../../features/models/types";
 import { requestModelSelection } from "../../features/models/client";
 import {
@@ -115,6 +119,17 @@ export function ChatShell({
   const mobileTrigger = useRef<HTMLButtonElement>(null);
   const main = useRef<HTMLElement>(null);
   const desktopSidebar = useRef<HTMLDivElement>(null);
+
+  // The companion's runtime behavior. The controller owns the pet's state and its one
+  // settle timer; the shell only reports what the chat lifecycle actually did, through
+  // the adapter in `features/chat/pet-reactions.ts`. Nothing here is persisted and
+  // nothing reaches a provider: the pet's mood, appearance, and personality are never
+  // written to the database, added to a request, or turned into a prompt.
+  const behavior = usePetBehavior({
+    pet: companionPetKey,
+    personality: companionPersonalityKey,
+  });
+  const companionPet = resolvePet(companionPetKey);
 
   // The static example belongs to the signed-out shell only.
   const showSample = sampleRequested && !account;
@@ -267,8 +282,17 @@ export function ChatShell({
    * server-side: this shows the deltas as they arrive and keeps them only until
    * the server confirms the stored row. A failed or cancelled stream discards the
    * partial text and leaves the stored user message untouched.
+   *
+   * The companion is told about the same real phases, through `reactions`: the
+   * request being issued, the first provider text, and then exactly one outcome.
+   * A fresh reporter is created per generation (the caller passes its own when a
+   * user message preceded this reply), so a retry or a replaced stream can never
+   * make one generation report two outcomes.
    */
-  const generateReply = async (conversationId: string) => {
+  const generateReply = async (
+    conversationId: string,
+    reactions: ChatPetReactions = createChatPetReactions(behavior.dispatch),
+  ) => {
     // A retry (or a second submit) replaces the previous stream instead of racing it.
     replyAbort.current?.abort();
     const controller = new AbortController();
@@ -278,38 +302,55 @@ export function ChatShell({
     setReplying(true);
     setStreaming({ conversationId, text: "", chunks: 0 });
 
+    // The request is genuinely on its way: this is reached only once the turn is
+    // stored (or a retry was asked for), never from a click alone.
+    reactions.generationStarted();
+
     const result = await requestAssistantReplyStream(
       conversationId,
       {
-        onDelta: (text) =>
+        onDelta: (text) => {
+          // Only the first delta is a phase change; the rest are more of the same
+          // answer, and the reporter says so once however many arrive.
+          reactions.firstContent();
           setStreaming((current) =>
             current?.conversationId === conversationId
               ? { ...current, text: current.text + text, chunks: current.chunks + 1 }
               : current,
-          ),
+          );
+        },
       },
       { signal: controller.signal },
     );
 
-    // A newer stream (or an unmount) already took over; leave its state alone.
+    // A newer stream (or an unmount) already took over; leave its state alone. The
+    // companion belongs to that newer generation, so this one reports nothing at all
+    // — a replaced stream must not settle, fail, or celebrate somebody else's reply.
     if (replyAbort.current !== controller) return;
     replyAbort.current = null;
     setReplying(false);
     setStreaming(null);
 
     if (result.ok) {
+      reactions.completed();
       appendStored(conversationId, result.value);
       scrollToLatest();
       // The reply changed the conversation's activity time.
       router.refresh();
       return;
     }
-    // The reader was cancelled because the user left or switched conversation.
-    if (result.aborted) return;
+    // The reader was cancelled because the user left or switched conversation. That
+    // is a cancellation, not a failure, so the pet settles rather than looking sad.
+    if (result.aborted) {
+      reactions.cancelled();
+      return;
+    }
     if (result.status === 401) {
+      reactions.failed();
       router.push("/login");
       return;
     }
+    reactions.failed();
     // The stored user message stays visible; nothing pretends a reply arrived.
     setReplyError({ conversationId, message: result.message });
     // This turn may already be answered (a duplicate submit, or another writer won
@@ -344,8 +385,12 @@ export function ChatShell({
     scrollToLatest();
 
     // The message is stored; the reply is a separate, retryable step that also
-    // keeps the composer locked so the same turn cannot be submitted twice.
-    await generateReply(conversationId);
+    // keeps the composer locked so the same turn cannot be submitted twice. One
+    // reporter covers the whole turn, so the companion reads it as a single coherent
+    // sequence — and a submission the server refused reported nothing at all.
+    const reactions = createChatPetReactions(behavior.dispatch);
+    reactions.messageSent();
+    await generateReply(conversationId, reactions);
     sendingRef.current = false;
     setSending(false);
   };
@@ -462,10 +507,28 @@ export function ChatShell({
               hintIsError={Boolean(modelError) || models.status === "error"}
             />
           </div>
-          <span className="preview-badge">
-            <span className="preview-dot" />
-            UI preview
-          </span>
+          <div className="header-right">
+            {/* The companion while a conversation is open: the same stored pet,
+                appearance, and personality the empty state shows, now reflecting what
+                the chat is actually doing. It is drawn only here, never beside the
+                welcome mark, so a page never carries two pets with the same
+                accessible name. The renderer owns that one label and is not a live
+                region, so a reaction is seen and never announced. */}
+            {conversation ? (
+              <PetRenderer
+                className="chat-companion"
+                pet={companionPet}
+                appearance={companionAppearanceKey}
+                personality={companionPersonalityKey}
+                state={behavior.state}
+                size="sm"
+              />
+            ) : null}
+            <span className="preview-badge">
+              <span className="preview-dot" />
+              UI preview
+            </span>
+          </div>
         </header>
         <div
           className="chat-scroll-area"
