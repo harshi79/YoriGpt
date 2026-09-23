@@ -589,21 +589,22 @@ describe("changing pet or personality around a reaction", () => {
   });
 
   it("resolves the next reaction with the new personality, not the old one", async () => {
-    openConversation({ companionPetKey: "ember-fox", companionPersonalityKey: "curious" });
+    openConversation({ companionPetKey: "yori-cat", companionPersonalityKey: "calm" });
     await send();
     await streams[0].end(storedReply());
-    // Curious is not a high-motion personality, so a success is merely pleasing.
+    // A calm pet is pleased about a good answer, and no more than that.
     expect(companionState()).toBe("happy");
 
     renderShell({
       conversation: CONVERSATION_A,
-      companionPetKey: "ember-fox",
-      companionPersonalityKey: "playful",
+      companionPetKey: "yori-cat",
+      companionPersonalityKey: "curious",
     });
-    expect(companion()?.getAttribute("data-personality")).toBe("playful");
+    expect(companion()?.getAttribute("data-personality")).toBe("curious");
     expect(companionState()).toBe("idle");
 
-    // The playful fox cannot sit still: the same lifecycle resolves differently now.
+    // The same lifecycle now resolves through the new personality's metadata: an
+    // energetic pet shows a good answer at full strength.
     await send("Another question");
     await streams[1].end(storedReply());
     expect(companionState()).toBe("excited");
@@ -644,8 +645,11 @@ describe("changing pet or personality around a reaction", () => {
     expect(companionState()).toBe("thinking");
     await streams[1].delta("Hello ");
     await streams[1].end(storedReply());
-    expect(companionState()).toBe("happy");
+    // The fox brings its own default personality (curious, which the catalog tags
+    // energetic), so the same success resolves more strongly than the calm cat's did.
+    expect(companionState()).toBe("excited");
     expect(companion()?.getAttribute("data-pet")).toBe("ember-fox");
+    expect(companion()?.getAttribute("data-personality")).toBe("curious");
 
     advance(PET_REACTION_DURATIONS.brief);
     expect(companionState()).toBe("idle");

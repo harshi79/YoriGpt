@@ -9,7 +9,8 @@ events while the browser renders it, and the finished answer is stored; several
 OpenRouter keys rotate with a short cooldown when one is refused or rate limited,
 and now a foundational **interactive 2D pet framework** with a development
 playground, **persistent per-account pet selection**, persistent personalities, and a
-deterministic local reaction engine that follows the real chat lifecycle — while
+deterministic local reaction engine that follows the real chat lifecycle and gives
+those personalities observably different reactions — while
 other settings still do not exist. The home route is an original
 charcoal-and-mint interface — with a light palette behind the theme preference —
 ready for later service integration. The chat shell
@@ -552,27 +553,40 @@ lifecycle — no AI connection and no finished artwork.
   one is catalog-defined with a stable `id` from a closed set (`calm`, `playful`,
   `curious`, `sleepy`), a display `name`, a one-line `description`, a few tags from a
   fixed trait vocabulary (`gentle`, `energetic`, `inquisitive`, `restful`, `sociable`,
-  `independent`), and optional tiny `hints` (`restingState`, `motionLevel`) for later
-  behavior tasks. No prompt text, no asset or URL, and nothing a client can supply.
+  `independent`), and optional tiny `hints` (`restingState`, `motionLevel`) that the
+  reaction engine reads as behavior metadata. No prompt text, no asset or URL, and
+  nothing a client can supply.
   Definitions live in one library in `catalog.ts` that pets reference, so a personality
   is written once; each pet offers a small subset and declares exactly one default
   (Yori: calm/sleepy/curious, Ember: curious/playful, Pip: playful/sleepy but never
   selectable). `isSelectablePersonality` allows an id only for an available pet that
   lists it, and `resolvePersonalityForPet` maps a missing, unknown, or other-pet id
-  back to that pet's default. Personalities now drive the local reaction engine below;
-  they still produce no AI behavior, no dialogue, and no system prompt.
+  back to that pet's default. Personalities drive the local reaction engine below
+  through exactly that metadata — the trait tags and the two hints — which is what makes
+  the four of them observably different on the same event. They still produce no AI
+  behavior, no dialogue, and no system prompt, and none of it leaves the browser.
 - **Behavior & reactions.** `reactions.ts` is a pure engine: it takes a pet, a
   personality, an application event, and the current state, and returns one of the six
   **existing** states plus an optional settle duration. No React, no timers, no network,
   no database, no AI — the same inputs always give the same output, which is what makes
   it testable with synthetic events. The vocabulary is deliberately small: `idle`,
   `user-started-message`, `thinking`, `response-started`, `response-completed`,
-  `response-error`, `cancelled`, `successful-action`. Only two personality rules exist,
-  both reading hints the catalog already declares — `motionLevel: "high"` turns a
-  positive reaction into `excited` where a calmer pet manages `happy`, and
-  `restingState: "sleeping"` keeps a drowsy pet dozing through `response-started`.
-  Where no existing state is an exact match the closest one is used and documented in
-  the mapping (`response-started` → `thinking`, since there is no "attentive" state).
+  `response-error`, `cancelled`, `successful-action`. Personality enters only as a
+  **temperament** read from the catalog definition — *expressive* (a `high` motion level
+  or the `energetic` trait), *sociable*, *inquisitive*, and a *resting* state — so no
+  personality id appears in the engine and a fifth personality would behave from its own
+  metadata with no code change. With the catalog as it stands that gives four
+  distinguishable companions (calm / playful / curious / sleepy): a new message is
+  `happy` / `excited` / `thinking` / `happy`, waiting for an answer is `thinking` /
+  `happy` / `thinking` / `sleeping`, a good outcome is `happy` / `excited` / `excited` /
+  `happy`, and a cancellation is `idle` / `idle` / `idle` / `sleeping`. Three things
+  deliberately do not vary, because varying them would misinform: `response-error` is
+  always `sad`, `thinking` always reports real processing, and a cancellation is never a
+  positive reaction. Where no existing state is an exact match the closest one is used
+  and documented in the mapping (`response-started` → `thinking` for a personality that
+  rests at attention, since there is no "attentive" state). All of it is local and
+  deterministic — no randomness, no timers inside the resolver, nothing persisted, and
+  nothing about a personality reaching OpenRouter or a prompt.
   `use-pet-behavior.ts` is the client-side controller that owns the only mutable parts:
   the current state, a **single** settle timer, and an unmount guard. State is derived
   rather than synced — a reaction is stored with the pet and personality that produced
@@ -671,10 +685,15 @@ lifecycle — no AI connection and no finished artwork.
   a short note on failure — no spinner); reloading keeps all three. An anonymous visitor
   gets the full playground but the choices stay in the tab and never touch the database.
   A small **Reaction demo** dispatches the synthetic events (`User Message`,
-  `Start Thinking`, `Response Complete`, `Response Error`, `Cancel`) straight into the
-  local behavior engine so the personality mapping and the settle timing are visible;
-  mood and size stay manual controls. Both paths write nothing at runtime — mood,
-  temporary state, and reaction history are never persisted.
+  `Start Thinking`, `Response Started`, `Response Complete`, `Response Error`, `Cancel`)
+  straight into the local behavior engine so the personality mapping and the settle
+  timing are visible; `Response Started` is there beside `Start Thinking` because a wait
+  is where the personalities differ most, while processing looks the same on all of them.
+  Under the demo, one read-only line resolves the last event against **every** personality
+  the selected pet offers and marks the chosen one, so the differences can be compared
+  without switching back and forth — plain text, not a live region, and no new page or
+  dashboard. Mood and size stay manual controls. Both paths write nothing at runtime —
+  mood, temporary state, and reaction history are never persisted.
 - **Chat integration.** The empty-state companion beside the welcome mark is the
   signed-in user's stored pet, appearance, and personality (the catalog defaults for
   anonymous visitors), loaded server-side and passed down as props — the chat stores
@@ -805,11 +824,16 @@ renderer's accessible label, size variants, `data-state`/`data-motion` attribute
 labelled placeholder for an unavailable or malformed pet, plus the pet preference
 service's default/invalid/unavailable/per-user resolution, the `/api/settings/pet`
 route's auth, origin, and strict-body handling, and the selection client's payload and
-error mapping), and the local reaction engine (every event's deterministic mapping,
-repeated calls returning identical results, the personality-driven differences and the
-events that stay identical on purpose, missing and invalid pet/personality input falling
-back without throwing, `idle` holding, an error reaction never being positive, a
-cancelled reaction staying safe, the chat-phase seam, and the behavior
+error mapping), and the local reaction engine (every event's deterministic mapping for
+every personality the catalog offers, repeated calls returning identical results, each
+pair of personalities differing on the *intended* events rather than merely on some
+event, while a failure, real processing, and an explicit settle stay identical for all
+of them, the temperament rules re-derived from the catalog metadata instead of restated
+as per-personality expectations, a cancellation never turning positive for any
+personality or current state, missing, invalid, and other-pet pet/personality input
+falling back without throwing, `idle` holding, an error reaction never being positive,
+the resolver scheduling no timer and consulting no clock, no randomness, and nothing
+outside its arguments, the chat-phase seam, and the behavior
 controller's dispatch, settle-to-idle, reset, per-pet and per-personality resolution
 with no stale reaction, and a settle timer that cannot fire after unmount), and the
 chat integration (each lifecycle moment producing its documented event, a reporter
@@ -842,7 +866,13 @@ accessible name, no live region, the same element and footprint across reactions
 pose for every reaction so nothing depends on motion. The behavior controller is
 additionally checked for the two things only a real mount can show: that a state left by
 one pet or personality is never read as the next one's current state, and that its
-dispatch, hold, and reset are ignored once it is gone. The browser suite drives the selector end to end: the catalog it
+dispatch, hold, and reset are ignored once it is gone. The playground is mounted in
+jsdom for the same reason, so the reaction demo is covered where it can actually run: a
+dispatched event reaching the renderer and the note, the read-only comparison listing
+exactly the personalities the selected pet offers with the chosen one marked, that
+listing staying readable after a temporary reaction settles and giving way to the manual
+state controls, no live region anywhere on the page, and an anonymous visitor's choices
+and reactions performing no `fetch` at all. The browser suite drives the selector end to end: the catalog it
 lists, a stored choice surviving a reload and a second conversation, the identifier
 the stub receives for the default and for two other selections (including a streamed
 rotation), two accounts keeping separate choices, and a raw provider identifier
@@ -858,7 +888,9 @@ operation of the controls, reduced motion removing the movement while the pose
 remains, a signed-in user's choice persisting across a reload, an anonymous choice
 staying local and never reaching the database, the reaction demo changing the pose for
 each synthetic event and settling back to idle while a high-motion personality reacts
-more strongly than a calm one, that demo working from the keyboard and under reduced
+more strongly than a calm one, the demo's read-only comparison line resolving that same
+event for every personality the selected pet offers and marking the chosen one without
+announcing anything, that demo working from the keyboard and under reduced
 motion, and the chat empty-state companion
 following the stored pet without breaking a narrow layout. Against the real streaming
 stub it also drives the header companion: following the live reply phases and settling

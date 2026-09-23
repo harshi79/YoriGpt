@@ -17,6 +17,7 @@ import {
 } from "../client";
 import {
   PET_REACTION_EVENT_LABELS,
+  resolveReaction,
   type PetReactionEvent,
 } from "../reactions";
 import { PET_STATES, PET_STATE_LABELS } from "../state";
@@ -46,10 +47,17 @@ type Props = {
  * The events the demo can fire. A deliberate subset of the vocabulary: enough to show
  * a positive, a negative, an in-progress, and a cancel reaction without turning the
  * playground into an event browser.
+ *
+ * `response-started` joins `thinking` even though both are "in progress", because they
+ * are the two events that say different things: `thinking` reports real processing and
+ * every personality shows it identically, while `response-started` is a wait, and a wait
+ * is exactly where the personalities part company — a drowsy pet dozes, a playful one
+ * enjoys itself. Demoing only the first would hide the difference.
  */
 const REACTION_DEMO_EVENTS: readonly PetReactionEvent[] = [
   "user-started-message",
   "thinking",
+  "response-started",
   "response-completed",
   "response-error",
   "cancelled",
@@ -72,7 +80,9 @@ const REACTION_DEMO_EVENTS: readonly PetReactionEvent[] = [
  * A **Reaction demo** group fires synthetic application events at the behavior
  * controller (`usePetBehavior`) so the personality-aware mapping is visible: the same
  * event on a different personality can resolve to a different state, and the note under
- * the buttons states exactly which event produced which state. Nothing here is
+ * the buttons states exactly which event produced which state. A second, read-only line
+ * resolves that same event against *every* personality the selected pet offers, so the
+ * differences can be compared without switching back and forth. Nothing here is
  * persisted, and nothing is connected to chat, streaming, or the AI.
  *
  * The controls are ordinary buttons (keyboard operable, `aria-pressed`). The mood
@@ -350,6 +360,39 @@ export function PetPlayground({
               ? `${PET_REACTION_EVENT_LABELS[behavior.lastEvent]} → ${PET_STATE_LABELS[behavior.state]}`
               : "Dispatch an event to see how this pet reacts."}
           </p>
+          {/* The same event against every personality this pet offers, so the
+              differences are visible without switching back and forth. Read-only and
+              pure: it asks the engine directly, from a neutral start, and changes no
+              state — the pet above still shows the selected personality's reaction, and
+              the line is plain text rather than a live region, so it is never
+              announced. It describes the event rather than the pose on show, so it stays
+              readable after a temporary reaction has settled. Personalities come from the
+              catalog list this pet declares, so nothing here duplicates a definition. */}
+          {behavior.lastEvent ? (
+            <p className="pets-reaction-compare" data-event={behavior.lastEvent}>
+              <span className="pets-reaction-compare-label">
+                {PET_REACTION_EVENT_LABELS[behavior.lastEvent]} on each personality:
+              </span>
+              {personalities.map((option) => {
+                const reaction = resolveReaction({
+                  pet: pet.id,
+                  personality: option.id,
+                  event: behavior.lastEvent,
+                });
+                return (
+                  <span
+                    key={option.id}
+                    className="pets-reaction-compare-item"
+                    data-personality={option.id}
+                    data-state={reaction.state}
+                    aria-current={option.id === personality.id ? "true" : undefined}
+                  >
+                    {option.name} → {PET_STATE_LABELS[reaction.state]}
+                  </span>
+                );
+              })}
+            </p>
+          ) : null}
         </div>
 
         <p className={`settings-hint ${error ? "is-error" : ""}`} role={error ? "alert" : undefined}>
