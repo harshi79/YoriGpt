@@ -1,0 +1,65 @@
+name: Foundation checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+        env:
+          DATABASE_URL: postgresql://validation:validation@localhost:5432/validation
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run db:validate
+        env:
+          DATABASE_URL: postgresql://validation:validation@localhost:5432/validation
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_only
+          POSTGRES_DB: yorigpt_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d yorigpt_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:ci_only@localhost:5432/yorigpt_test?schema=public
+      DATABASE_TEST_URL: postgresql://postgres:ci_only@localhost:5432/yorigpt_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npm run db:validate
+      - run: npm run db:deploy
+      - run: npm run db:deploy
+      - run: npm run db:status
+      - run: npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+      - run: npm run test:db
+      # The signed-in browser checks need the migrated database above; without
+      # DATABASE_TEST_URL they would be skipped (Playwright reads it here).
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

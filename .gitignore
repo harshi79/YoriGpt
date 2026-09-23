@@ -141,3 +141,24 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Test artifacts
+/test-results/
+/playwright-report/
+/blob-report/
+
+# Local databases and editors
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+/postgres-data/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated Next.js declarations
+next-env.d.ts
