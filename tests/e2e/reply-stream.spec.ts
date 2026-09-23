@@ -359,3 +359,120 @@ test("the chat companion reacts to the real stream phases and settles again", as
   expect(states).toContain("happy");
   expect(states[states.length - 1]).toBe("idle");
 });
+
+test("the companion is drawn once, and only while a conversation is open", async ({ page }) => {
+  await signUp(page, "petonce");
+
+  // The welcome state keeps its own static figure and no header companion.
+  await page.goto("/");
+  await expect(page.locator(".chat-companion")).toHaveCount(0);
+  await expect(page.locator(".welcome-pet")).toHaveCount(1);
+
+  const conversationId = await openNewConversation(page);
+  const companion = page.locator(".chat-companion");
+  await expect(companion).toHaveCount(1);
+  await expect(companion).toHaveAttribute("aria-label", "Yori, a cat");
+  // One pet, one accessible name: the page never carries a second copy of it.
+  await expect(page.getByRole("img", { name: "Yori, a cat" })).toHaveCount(1);
+  await expect(page.locator(".welcome-pet")).toHaveCount(0);
+
+  // A reaction is seen and never announced: the companion is not a live region, and
+  // its name does not change with its mood.
+  await expect(companion).toHaveAttribute("role", "img");
+  expect(await companion.getAttribute("aria-live")).toBeNull();
+
+  await send(page, "Say hello");
+  await expect(companion).toHaveAttribute("data-state", "thinking");
+  await expect(page.locator(".chat-companion")).toHaveCount(1);
+  await expect(storedAssistantMessages(page)).toHaveCount(1, { timeout: 15_000 });
+
+  // Streaming and settling never add a second companion, and its name is unchanged.
+  await expect(page.locator(".chat-companion")).toHaveCount(1);
+  await expect(companion).toHaveAttribute("aria-label", "Yori, a cat");
+
+  // Nor does a route change: away from the conversation and back into it.
+  await page.goto("/");
+  await expect(page.locator(".chat-companion")).toHaveCount(0);
+  await page.goto(`/chat/${conversationId}`);
+  await expect(page.locator(".chat-companion")).toHaveCount(1);
+  await expect(page.getByRole("img", { name: "Yori, a cat" })).toHaveCount(1);
+
+  // A reload shows the stored exchange with the companion at rest, still drawn once.
+  await page.reload();
+  await expect(page.locator(".chat-companion")).toHaveCount(1);
+  await expect(companion).toHaveAttribute("data-state", "idle");
+  await expect(storedAssistantMessages(page)).toHaveCount(1);
+
+  // The header keeps its footprint on a narrow viewport, with no sideways overflow.
+  await page.setViewportSize({ width: 375, height: 800 });
+  await expect(companion).toBeVisible();
+  const box = await companion.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThan(0);
+  const dims = await page.evaluate(() => ({
+    width: document.documentElement.scrollWidth,
+    viewport: window.innerWidth,
+  }));
+  expect(dims.width).toBeLessThanOrEqual(dims.viewport);
+});
+
+test("a retried reply gives the companion a clean reaction lifecycle", async ({ page }) => {
+  await signUp(page, "petretry");
+  await openNewConversation(page);
+  const companion = page.locator(".chat-companion");
+
+  // The stub streams two deltas and then drops the connection, once per text: the
+  // failure is real, and the retry that follows it succeeds.
+  await send(page, "[streamfail] cut this off");
+
+  await expect(replyNotice(page)).toHaveClass(/is-error/);
+  await expect(companion).toHaveAttribute("data-state", "sad");
+
+  // The retry is a generation of its own. It thinks again from the start, and the
+  // failure before it may not follow it into a success or leave it stuck.
+  await replyNotice(page).getByRole("button", { name: "Try again" }).click();
+  await expect(companion).toHaveAttribute("data-state", "thinking");
+  await expect(storedAssistantMessages(page)).toHaveCount(1, { timeout: 15_000 });
+  await expect(companion).toHaveAttribute("data-state", "happy");
+  await expect(companion).toHaveAttribute("data-state", "idle", { timeout: 10_000 });
+
+  // One stored reply for one turn: the failed attempt left nothing behind, and the
+  // retry did not store a second answer.
+  const stored = await storedMessages(page, await conversationIdFromUrl(page));
+  expect(stored.messages.map((message) => message.role)).toEqual(["USER", "ASSISTANT"]);
+});
+
+test("leaving a conversation mid-generation settles the companion", async ({ page }) => {
+  await signUp(page, "petnav");
+  const first = await openNewConversation(page);
+  const companion = page.locator(".chat-companion");
+
+  // The stub pauses after its first delta, so generation is observably in progress
+  // rather than over before the navigation can happen.
+  await send(page, "[slow] Explain streaming");
+  await expect(companion).toHaveAttribute("data-state", "thinking");
+
+  // Opening another conversation aborts that generation. The companion settles
+  // instead of thinking forever about a reply that will never arrive here.
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(page).toHaveURL(/\/chat\/[A-Za-z0-9_-]+$/);
+  expect(await conversationIdFromUrl(page)).not.toBe(first);
+  await expect(companion).toHaveCount(1);
+  await expect(companion).toHaveAttribute("data-state", "idle");
+
+  // Nothing from the abandoned generation follows the user here.
+  await expect(page.locator(".conversation-empty")).toBeVisible();
+  await expect(page.locator(".reply-notice")).toHaveCount(0);
+
+  // And the new conversation is usable: a fresh turn gets a fresh lifecycle.
+  await send(page, "Hello again");
+  await expect(companion).toHaveAttribute("data-state", "thinking");
+  await expect(storedAssistantMessages(page)).toHaveCount(1, { timeout: 15_000 });
+  await expect(companion).toHaveAttribute("data-state", "happy");
+  await expect(companion).toHaveAttribute("data-state", "idle", { timeout: 10_000 });
+
+  // The abandoned reply was never stored in either conversation.
+  const stored = await storedMessages(page, await conversationIdFromUrl(page));
+  expect(stored.messages.map((message) => message.role)).toEqual(["USER", "ASSISTANT"]);
+  const abandoned = await storedMessages(page, first);
+  expect(abandoned.messages.map((message) => message.role)).toEqual(["USER"]);
+});

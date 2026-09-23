@@ -576,8 +576,13 @@ lifecycle — no AI connection and no finished artwork.
   `use-pet-behavior.ts` is the client-side controller that owns the only mutable parts:
   the current state, a **single** settle timer, and an unmount guard. State is derived
   rather than synced — a reaction is stored with the pet and personality that produced
-  it, so changing either settles the pet with no effect and no stale value. Nothing is
-  persisted: mood, temporary state, and reaction history never reach the database.
+  it, so changing either settles the pet with no effect and no stale value. The
+  "current state" the mapping reads is derived from that same record, never from a
+  second mirror, so a state left behind by one selection cannot be inherited by the
+  next (a dozing record from a sleepy personality cannot put a calm pet to sleep), and
+  the unmount guard covers the setters as well as the timer: a dispatch that outlives
+  its component writes nothing and schedules nothing. Nothing is persisted: mood,
+  temporary state, and reaction history never reach the database.
   `CHAT_PHASE_REACTIONS` maps the chat lifecycle onto the same vocabulary, so neither
   side grows a second event system.
 - **Chat reactions.** `features/chat/pet-reactions.ts` is the only bridge between the
@@ -593,6 +598,20 @@ lifecycle — no AI connection and no finished artwork.
   welcome mark, so a page carries exactly one accessible pet name — and it is not a live
   region, so reactions are seen and never announced. None of it is persisted, and none
   of it reaches a provider request, a prompt, or the database.
+- **Chat reaction lifecycle.** The shell keeps the generation it is reading in one ref:
+  the request's `AbortController` together with the reporter scoped to it, so the two
+  always end in the same step and a generation that is no longer current has no route
+  back to the pet or to the shell's state. A generation *replaced* by a newer one (a
+  retry, or a second submit that won the race) is sealed silently — the replacement
+  announces its own `thinking` and stays authoritative — while a generation *abandoned*
+  with nothing taking over (switching conversation, or leaving the page) reports
+  `cancelled`, so the companion settles instead of waiting forever for an answer that
+  will not arrive. Deltas and outcomes from a stream the shell has already dropped are
+  ignored, a message that finishes being stored after the user moved on does not start a
+  reply for a conversation that is no longer open, and every terminal path — success,
+  provider error, cancellation, navigation, replacement, unmount — leaves the pet either
+  settled or following the generation that is really in flight. No timer, retry rule, or
+  second reaction state was added to the chat component to achieve this.
 - **Renderer.** `<PetRenderer pet appearance personality state size className label />`
   renders any catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name
   (`role="img"`, e.g. "Yori, a cat"), marks the drawing `aria-hidden`, and carries the
@@ -662,8 +681,9 @@ lifecycle — no AI connection and no finished artwork.
   nothing pet-related itself. The personality is carried as data only: it alters no
   message, is never sent to OpenRouter, and is never turned into a system prompt. While
   a conversation is open the same companion also appears in the header and reacts to the
-  real reply lifecycle; it is still connected to no model selection, sentiment, or
-  provider detail, and its runtime state is never stored.
+  real reply lifecycle; that route loads the same three stored keys, so the header pet
+  and the empty-state pet cannot disagree. It is still connected to no model selection,
+  sentiment, or provider detail, and its runtime state is never stored.
 
 ## Architecture
 
@@ -802,7 +822,27 @@ is genuinely issued, the first delta reaching the renderer, a completed stream
 celebrating and settling, an error showing `sad`, a cancellation settling rather than
 sulking (and a dozing companion staying asleep through it, per the engine's documented
 rule), a refused message reporting nothing at all, a personality change mid-generation
-carrying no stale reaction, and the composer's own error display left intact. The browser suite drives the selector end to end: the catalog it
+carrying no stale reaction, and the composer's own error display left intact. The
+lifecycle edge cases are covered against that same real shell: two overlapping
+generations (a retry clicked twice before React re-renders) with the replaced request
+provably aborted, its late deltas kept out of the reply on screen, and its late success
+or failure changing neither the companion nor the stored thread; a retry after a
+provider error getting a clean `thinking → response-started → completed` sequence of its
+own with nothing inherited from the failure; cancellation, and a completion or an error
+arriving after it; switching conversation mid-generation, which settles the companion
+instead of leaving it thinking, keeps the abandoned stream's success and failure out of
+the next conversation, and leaves that conversation fully usable with a fresh
+lifecycle; a message that finishes being stored after the user left, which never starts
+a reply for a thread that is not open; unmounting mid-generation, which aborts the
+request and schedules no timer afterwards; pet and personality changes before, during,
+and after a reaction, including a settle timer left pending by the previous selection;
+and the header companion itself — drawn exactly once for an open conversation, absent
+from the welcome state, never duplicated by streaming or a route change, keeping one
+accessible name, no live region, the same element and footprint across reactions, and a
+pose for every reaction so nothing depends on motion. The behavior controller is
+additionally checked for the two things only a real mount can show: that a state left by
+one pet or personality is never read as the next one's current state, and that its
+dispatch, hold, and reset are ignored once it is gone. The browser suite drives the selector end to end: the catalog it
 lists, a stored choice surviving a reload and a second conversation, the identifier
 the stub receives for the default and for two other selections (including a streamed
 rotation), two accounts keeping separate choices, and a raw provider identifier
@@ -820,7 +860,13 @@ staying local and never reaching the database, the reaction demo changing the po
 each synthetic event and settling back to idle while a high-motion personality reacts
 more strongly than a calm one, that demo working from the keyboard and under reduced
 motion, and the chat empty-state companion
-following the stored pet without breaking a narrow layout.
+following the stored pet without breaking a narrow layout. Against the real streaming
+stub it also drives the header companion: following the live reply phases and settling
+back to idle, being drawn exactly once for an open conversation and not at all in the
+welcome state (with one accessible name, no live region, and no sideways overflow at
+375px), a retried reply getting a clean reaction lifecycle of its own after a stream
+that died mid-answer, and leaving a conversation mid-generation settling the companion
+instead of leaving it thinking about a reply that will never arrive.
 No AI check reaches the network: the provider contract is covered by unit tests with a
 mocked `fetch`, the reply service and database suites mock the adapter module, and the
 browser suite talks to a local stub (`tests/e2e/mock-openrouter.mjs`) wired in through
@@ -854,6 +900,18 @@ acceptance testing; those remain future verification work.
   generation succeeded via a temporary WASM config, and migration SQL was accepted
   by PostgreSQL. Prisma-managed deployment/history remains unverified. See
   [the database verification report](docs/database.md#what-was-actually-verified-in-this-sandbox).
+- **The Playwright suite cannot execute here, and was not executed for the pet
+  reaction lifecycle work.** `prisma generate` still fails on TLS to
+  `binaries.prisma.sh`, so `@prisma/client` is a stub: `npm run build` fails its own
+  type check, `npm start` then reports "Could not find a production build in the
+  `.next` directory", and the suite's `webServer` never comes up. Every route also
+  500s under `next dev` for the same reason (`@prisma/client did not initialize
+  yet`), so no page — not even the public `/pets` — could be inspected in a browser.
+  Browser binaries cannot be fetched either (`cdn.playwright.dev` is unreachable).
+  The browser checks for the companion lifecycle are written and parse
+  (`npx playwright test --list` counts them), but they are **unverified**: they need a
+  working `prisma generate` plus `DATABASE_TEST_URL`, like the rest of the signed-in
+  suite. The equivalent behavior is covered by the jsdom suites, which do run.
 - Streaming replies were verified against a real browser and the local stub
   (incremental delivery measured end to end, several deltas rendered before the
   stored row arrived), but never against the real OpenRouter service: the sandbox

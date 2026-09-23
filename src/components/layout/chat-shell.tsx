@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "./sidebar";
 import { ModelSelector } from "../chat/model-selector";
@@ -33,6 +33,41 @@ import {
 } from "../../features/conversations/types";
 
 type Account = { name: string; email: string };
+
+/**
+ * The generation the shell is reading: the request's abort controller together with
+ * the reporter scoped to it. Held in one ref, because the two always end together —
+ * cancelling the request without ending the reporting is what would let a stream the
+ * shell has already left behind move the companion.
+ */
+type ActiveGeneration = { controller: AbortController; reactions: ChatPetReactions };
+
+/**
+ * Ends the generation the shell is reading, if there is one, and drops it from the ref
+ * so the same generation can never be ended twice.
+ *
+ * `settle` says what the companion is told:
+ *
+ * - `false` for a generation a *newer* one is replacing. The reporter is sealed
+ *   silently, because the replacement announces itself a moment later and must stay
+ *   authoritative; a cancellation squeezed in between would only flicker.
+ * - `true` for a generation abandoned with nothing taking over — the user navigated
+ *   between conversations, or the shell is going away. It reports `cancelled`, which
+ *   is what stops the companion waiting forever for an answer that is never coming.
+ *   Once the controller itself has been torn down this is a no-op, so an unmounting
+ *   shell schedules nothing.
+ */
+function endActiveGeneration(
+  generation: RefObject<ActiveGeneration | null>,
+  settle: boolean,
+): void {
+  const active = generation.current;
+  if (!active) return;
+  generation.current = null;
+  active.controller.abort();
+  if (settle) active.reactions.cancelled();
+  else active.reactions.superseded();
+}
 
 type Props = {
   account: Account | null;
@@ -111,9 +146,14 @@ export function ChatShell({
     null,
   );
   const sendingRef = useRef(false);
-  // One reply request at a time: the ref holds the stream the shell is reading so
-  // an unmount, a conversation switch, or a retry can cancel it.
-  const replyAbort = useRef<AbortController | null>(null);
+  // One reply request at a time. This ref *is* the generation's identity: an unmount,
+  // a conversation switch, or a retry ends what is here, and a generation that is no
+  // longer here has no way back to the shell's state or to the companion.
+  const activeGeneration = useRef<ActiveGeneration | null>(null);
+  // The conversation on screen, for the callbacks that outlive the render which
+  // started them: a message can finish being stored after the user has moved on, and
+  // its reply belongs to the conversation that asked for it.
+  const openConversation = useRef<string | null>(conversation?.id ?? null);
   const scrollArea = useRef<HTMLDivElement>(null);
   const mobileDialog = useRef<HTMLDialogElement>(null);
   const mobileTrigger = useRef<HTMLButtonElement>(null);
@@ -145,15 +185,20 @@ export function ChatShell({
 
   // Leaving the page (or navigating between conversations) cancels the stream:
   // the reader stops, the server aborts the provider call, and nothing is stored
-  // for it. No state is updated after that, so an unmounted shell stays quiet.
+  // for it. The generation's reporting ends in the same step, so no state is updated
+  // afterwards and an unmounted shell stays quiet.
   useEffect(() => {
-    return () => replyAbort.current?.abort();
+    return () => endActiveGeneration(activeGeneration, true);
   }, []);
 
   useEffect(() => {
+    openConversation.current = conversation?.id ?? null;
     return () => {
-      replyAbort.current?.abort();
-      replyAbort.current = null;
+      // The conversation being left takes its generation with it: the request is
+      // aborted and the companion is told it was cancelled, which settles a pet that
+      // was still waiting on an answer. The stream's own callbacks then find a
+      // generation that is no longer current and report nothing into the next one.
+      endActiveGeneration(activeGeneration, true);
       setStreaming(null);
       setReplying(false);
     };
@@ -287,16 +332,21 @@ export function ChatShell({
    * request being issued, the first provider text, and then exactly one outcome.
    * A fresh reporter is created per generation (the caller passes its own when a
    * user message preceded this reply), so a retry or a replaced stream can never
-   * make one generation report two outcomes.
+   * make one generation report two outcomes. The reporter is stored with the
+   * request's controller, so the generation that is replaced stops reporting at the
+   * same moment it stops streaming — and only the generation in that ref can reach
+   * the shell's state or the pet.
    */
   const generateReply = async (
     conversationId: string,
     reactions: ChatPetReactions = createChatPetReactions(behavior.dispatch),
   ) => {
-    // A retry (or a second submit) replaces the previous stream instead of racing it.
-    replyAbort.current?.abort();
+    // A retry (or a second submit) replaces the previous stream instead of racing it,
+    // and seals the reporter that went with it: the newer generation is authoritative
+    // from here, and the one going away cannot settle, fail, or celebrate for it.
+    endActiveGeneration(activeGeneration, false);
     const controller = new AbortController();
-    replyAbort.current = controller;
+    activeGeneration.current = { controller, reactions };
 
     setReplyError(null);
     setReplying(true);
@@ -310,6 +360,10 @@ export function ChatShell({
       conversationId,
       {
         onDelta: (text) => {
+          // A delta from a generation the shell has already replaced is not this
+          // reply's text: it may not extend the newer stream, and it may not move the
+          // companion the newer generation is now reporting to.
+          if (activeGeneration.current?.controller !== controller) return;
           // Only the first delta is a phase change; the rest are more of the same
           // answer, and the reporter says so once however many arrive.
           reactions.firstContent();
@@ -326,8 +380,8 @@ export function ChatShell({
     // A newer stream (or an unmount) already took over; leave its state alone. The
     // companion belongs to that newer generation, so this one reports nothing at all
     // — a replaced stream must not settle, fail, or celebrate somebody else's reply.
-    if (replyAbort.current !== controller) return;
-    replyAbort.current = null;
+    if (activeGeneration.current?.controller !== controller) return;
+    activeGeneration.current = null;
     setReplying(false);
     setStreaming(null);
 
@@ -383,6 +437,17 @@ export function ChatShell({
     appendStored(conversationId, result.value);
     setDraft("");
     scrollToLatest();
+
+    // The shell may have moved on while the message was being stored: the user opened
+    // another conversation, or a new chat. Their message is stored and tagged with the
+    // conversation it belongs to, but its reply is not started for a thread that is no
+    // longer on screen — that would lock the new conversation's composer, report
+    // phases in its name, and move the companion for a reply nobody is watching.
+    if (openConversation.current !== conversationId) {
+      sendingRef.current = false;
+      setSending(false);
+      return;
+    }
 
     // The message is stored; the reply is a separate, retryable step that also
     // keeps the composer locked so the same turn cannot be submitted twice. One
