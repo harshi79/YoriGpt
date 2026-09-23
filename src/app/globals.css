@@ -2189,6 +2189,18 @@ svg {
   color: var(--muted);
   text-align: center;
 }
+/* The chosen personality, stated in text. Deliberately quiet: it is metadata, not a
+   status, and it is not a live region. */
+.pets-personality {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+.pets-personality strong {
+  font-weight: 600;
+  color: var(--text-body);
+}
 .pets-controls {
   display: grid;
   gap: 16px;

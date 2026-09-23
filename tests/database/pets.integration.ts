@@ -15,6 +15,10 @@ import {
   GET as GET_APPEARANCE,
   PUT as PUT_APPEARANCE,
 } from "../../src/app/api/settings/pet/appearance/route";
+import {
+  GET as GET_PERSONALITY,
+  PUT as PUT_PERSONALITY,
+} from "../../src/app/api/settings/pet/personality/route";
 
 /**
  * Real Better Auth sessions + real PostgreSQL, driving the real pet-selection route:
@@ -84,6 +88,25 @@ async function callUpdateAppearance(
   request.headers = new Headers(headers);
   return PUT_APPEARANCE(
     new Request(`${APP_ORIGIN}/api/settings/pet/appearance`, { method: "PUT", headers, body }),
+  );
+}
+
+async function callReadPersonality(cookie?: string) {
+  request.headers = new Headers(cookie ? { cookie } : {});
+  return GET_PERSONALITY();
+}
+
+async function callUpdatePersonality(
+  body: string,
+  options: { cookie?: string; origin?: string | null } = {},
+) {
+  const { cookie, origin = APP_ORIGIN } = options;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (cookie) headers.cookie = cookie;
+  if (origin) headers.origin = origin;
+  request.headers = new Headers(headers);
+  return PUT_PERSONALITY(
+    new Request(`${APP_ORIGIN}/api/settings/pet/personality`, { method: "PUT", headers, body }),
   );
 }
 
@@ -272,5 +295,102 @@ describe("the stored appearance", () => {
     });
     const read = (await (await callReadAppearance(alice.cookie)).json()) as { appearance: string };
     expect(read.appearance).toBe("classic");
+  });
+});
+
+describe("the stored personality", () => {
+  it("needs a session", async () => {
+    expect((await callReadPersonality()).status).toBe(401);
+    expect(
+      (await callUpdatePersonality(JSON.stringify({ personality: "sleepy" }), {})).status,
+    ).toBe(401);
+  });
+
+  it("reports the pet's default personality before anything is chosen", async () => {
+    await db.userPreferences.updateMany({
+      where: { userId: alice.id },
+      data: { selectedPetKey: DEFAULT_PET_ID, uiPreferences: {} },
+    });
+
+    const response = await callReadPersonality(alice.cookie);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ pet: DEFAULT_PET_ID, personality: "calm" });
+  });
+
+  it("stores a valid personality as a single key, keeping the pet and the appearance", async () => {
+    await db.userPreferences.update({
+      where: { userId: alice.id },
+      data: { uiPreferences: { petAppearance: "night" } },
+    });
+
+    expect(
+      (await callUpdatePersonality(JSON.stringify({ personality: "sleepy" }), { cookie: alice.cookie }))
+        .status,
+    ).toBe(200);
+
+    const row = await db.userPreferences.findUniqueOrThrow({ where: { userId: alice.id } });
+    // The pet column and the stored appearance both survive the personality write.
+    expect(row.selectedPetKey).toBe(DEFAULT_PET_ID);
+    expect(row.uiPreferences).toEqual({ petAppearance: "night", petPersonality: "sleepy" });
+
+    const read = (await (await callReadPersonality(alice.cookie)).json()) as {
+      pet: string;
+      personality: string;
+    };
+    expect(read).toEqual({ pet: DEFAULT_PET_ID, personality: "sleepy" });
+    // And the appearance route still reports the appearance it stored earlier.
+    const appearance = (await (await callReadAppearance(alice.cookie)).json()) as {
+      appearance: string;
+    };
+    expect(appearance.appearance).toBe("night");
+  });
+
+  it("keeps each account's personality separate", async () => {
+    // Bob is on the fox and has stored no personality, so he resolves to its default.
+    const bobRead = (await (await callReadPersonality(bob.cookie)).json()) as {
+      personality: string;
+    };
+    expect(bobRead.personality).toBe("curious");
+  });
+
+  it("refuses another pet's personality, an unknown one, and unexpected bodies", async () => {
+    const before = await db.userPreferences.findUniqueOrThrow({ where: { userId: alice.id } });
+
+    const cases: [string, string][] = [
+      // Alice is on the cat; "playful" belongs to the fox.
+      ["another pet's personality", JSON.stringify({ personality: "playful" })],
+      ["unknown personality", JSON.stringify({ personality: "disco" })],
+      ["non-string personality", JSON.stringify({ personality: 7 })],
+      ["an arbitrary personality object", JSON.stringify({ personality: { id: "sleepy" } })],
+      ["missing personality", "{}"],
+      ["malformed body", "{not json"],
+      ["unexpected field", JSON.stringify({ personality: "sleepy", pet: "ember-fox" })],
+      ["supplied user id", JSON.stringify({ personality: "sleepy", userId: bob.id })],
+    ];
+    for (const [label, body] of cases) {
+      const response = await callUpdatePersonality(body, { cookie: alice.cookie });
+      expect(response.status, label).toBe(400);
+    }
+
+    const evil = await callUpdatePersonality(JSON.stringify({ personality: "curious" }), {
+      cookie: alice.cookie,
+      origin: "https://evil.example",
+    });
+    expect(evil.status).toBe(403);
+
+    const after = await db.userPreferences.findUniqueOrThrow({ where: { userId: alice.id } });
+    expect(after.uiPreferences).toEqual(before.uiPreferences);
+    expect(after.selectedPetKey).toBe(before.selectedPetKey);
+  });
+
+  it("resolves an invalid stored personality to the pet's default on read", async () => {
+    await db.userPreferences.update({
+      where: { userId: alice.id },
+      data: { uiPreferences: { petPersonality: "not-real" } },
+    });
+    const read = (await (await callReadPersonality(alice.cookie)).json()) as {
+      personality: string;
+    };
+    expect(read.personality).toBe("calm");
   });
 });

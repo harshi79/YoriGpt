@@ -7,7 +7,7 @@ import { loadCompanion } from "@/server/pets/service";
 /**
  * New chat. Anonymous visitors get the presentation-only shell; signed-in users
  * additionally get their own conversation list in the sidebar, and the empty-state
- * companion is their stored pet and appearance.
+ * companion is their stored pet, appearance, and personality.
  */
 export default async function Home() {
   const user = await getCurrentUser();
@@ -25,6 +25,7 @@ export default async function Home() {
       models={models}
       companionPetKey={companion.pet}
       companionAppearanceKey={companion.appearance}
+      companionPersonalityKey={companion.personality}
     />
   );
 }

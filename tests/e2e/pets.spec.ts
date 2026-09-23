@@ -35,6 +35,12 @@ async function storedAppearance(page: Page): Promise<string> {
   return ((await response.json()) as { appearance: string }).appearance;
 }
 
+async function storedPersonality(page: Page): Promise<string> {
+  const response = await page.context().request.get("/api/settings/pet/personality");
+  expect(response.status()).toBe(200);
+  return ((await response.json()) as { personality: string }).personality;
+}
+
 test("the playground loads and lists only the available pets", async ({ page }) => {
   await page.goto("/pets");
 
@@ -273,5 +279,120 @@ test("a signed-in user's appearance is persisted and reaches the chat companion"
   await expect(page.locator(".welcome-figure .pet-renderer")).toHaveAttribute(
     "data-appearance",
     "night",
+  );
+});
+
+test("personality controls change the selection and reset when the pet changes", async ({
+  page,
+}) => {
+  await page.goto("/pets");
+  const personalityGroup = page.getByRole("group", { name: "Choose a personality" });
+
+  // The cat starts on its declared default, and its own options are offered.
+  await expect(renderer(page)).toHaveAttribute("data-personality", "calm");
+  await expect(personalityGroup.getByRole("button", { name: "Sleepy" })).toBeVisible();
+  await expect(personalityGroup.getByRole("button", { name: "Calm" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // Picking one is exposed both in the data and in the pressed state.
+  await personalityGroup.getByRole("button", { name: "Sleepy" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-personality", "sleepy");
+  await expect(personalityGroup.getByRole("button", { name: "Sleepy" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // The fox does not offer "sleepy", so switching resolves to the fox's own default.
+  await page.getByRole("button", { name: /Ember/ }).click();
+  await expect(renderer(page)).toHaveAttribute("data-pet", "ember-fox");
+  await expect(renderer(page)).toHaveAttribute("data-personality", "curious");
+  await expect(personalityGroup.getByRole("button", { name: "Sleepy" })).toHaveCount(0);
+
+  // Anonymous: nothing was written.
+  expect((await page.context().request.get("/api/settings/pet/personality")).status()).toBe(401);
+});
+
+test("keyboard users can choose a personality", async ({ page }) => {
+  await page.goto("/pets");
+  const personalityGroup = page.getByRole("group", { name: "Choose a personality" });
+
+  await personalityGroup.getByRole("button", { name: "Curious" }).focus();
+  await page.keyboard.press("Enter");
+
+  await expect(renderer(page)).toHaveAttribute("data-personality", "curious");
+  await expect(personalityGroup.getByRole("button", { name: "Curious" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+test("the playground still fits a narrow viewport with the personality controls", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto("/pets");
+
+  await expect(page.getByRole("group", { name: "Choose a personality" })).toBeVisible();
+  const dims = await page.evaluate(() => ({
+    width: document.documentElement.scrollWidth,
+    viewport: window.innerWidth,
+  }));
+  expect(dims.width).toBeLessThanOrEqual(dims.viewport);
+});
+
+test("the existing pet, appearance, state, and size controls still work", async ({ page }) => {
+  await page.goto("/pets");
+
+  await page.getByRole("button", { name: /Ember/ }).click();
+  await expect(renderer(page)).toHaveAttribute("data-pet", "ember-fox");
+
+  await page
+    .getByRole("group", { name: "Choose an appearance" })
+    .getByRole("button", { name: "Flame" })
+    .click();
+  await expect(renderer(page)).toHaveAttribute("data-appearance", "ember");
+
+  await page.getByRole("button", { name: "Thinking", exact: true }).click();
+  await expect(renderer(page)).toHaveAttribute("data-state", "thinking");
+
+  await page.getByRole("button", { name: "Small", exact: true }).click();
+  await expect(renderer(page)).toHaveClass(/pet-renderer--sm/);
+
+  // None of those disturbed the personality, which stays on the fox's default.
+  await expect(renderer(page)).toHaveAttribute("data-personality", "curious");
+});
+
+test("a signed-in user's personality is persisted and reaches the chat companion", async ({
+  page,
+}) => {
+  test.skip(!databaseUrl, DATABASE_SKIP_REASON);
+  await signUp(page, "pets-personality");
+  await page.goto("/pets");
+  const personalityGroup = page.getByRole("group", { name: "Choose a personality" });
+
+  await expect(renderer(page)).toHaveAttribute("data-personality", "calm");
+  await personalityGroup.getByRole("button", { name: "Sleepy" }).click();
+  await expect(renderer(page)).toHaveAttribute("data-personality", "sleepy");
+  await expect.poll(() => storedPersonality(page)).toBe("sleepy");
+
+  // A reload re-reads the stored personality from the server.
+  await page.reload();
+  await expect(renderer(page)).toHaveAttribute("data-personality", "sleepy");
+  await expect(personalityGroup.getByRole("button", { name: "Sleepy" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // The personality write left the stored pet and appearance exactly as they were.
+  await expect.poll(() => storedPet(page)).toBe("yori-cat");
+  await expect.poll(() => storedAppearance(page)).toBe("classic");
+
+  // The chat companion carries the persisted personality.
+  await page.goto("/");
+  await expect(page.locator(".welcome-figure .pet-renderer")).toHaveAttribute(
+    "data-personality",
+    "sleepy",
   );
 });

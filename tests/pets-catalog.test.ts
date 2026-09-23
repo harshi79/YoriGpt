@@ -3,13 +3,18 @@ import {
   DEFAULT_PET_ID,
   PET_CATALOG,
   defaultAppearanceForPet,
+  defaultPersonalityForPet,
   findAppearanceForPet,
+  findPersonalityForPet,
   findPet,
   isSelectableAppearance,
+  isSelectablePersonality,
   isSelectablePetId,
   listAppearancesForPet,
   listAvailablePets,
+  listPersonalitiesForPet,
   resolveAppearanceForPet,
+  resolvePersonalityForPet,
   resolvePet,
   toRenderablePet,
 } from "../src/features/pets/catalog";
@@ -18,11 +23,15 @@ import {
   isPetAppearance,
   isPetAsset,
   isPetDefinition,
+  isPetPersonality,
   PET_PALETTES,
+  PET_PERSONALITY_MOTION_LEVELS,
+  PET_PERSONALITY_TRAITS,
   PET_SHAPES,
   PET_SPECIES,
   PET_PERSONALITIES,
 } from "../src/features/pets/types";
+import { PET_STATES } from "../src/features/pets/state";
 
 describe("the pet catalog", () => {
   it("gives every entry a unique id", () => {
@@ -139,5 +148,74 @@ describe("the appearance catalog", () => {
     expect(resolveAppearanceForPet("ember-fox", null).id).toBe(DEFAULT_APPEARANCE_ID);
     // An unknown pet still resolves to a safe default without throwing.
     expect(resolveAppearanceForPet("nope", "ember").id).toBe(DEFAULT_APPEARANCE_ID);
+  });
+});
+
+describe("the personality catalog", () => {
+  it("defines every personality with safe, code-owned metadata only", () => {
+    for (const pet of PET_CATALOG) {
+      const personalities = listPersonalitiesForPet(pet.id);
+      expect(personalities.length, pet.id).toBeGreaterThan(0);
+      for (const personality of personalities) {
+        expect(isPetPersonality(personality), `${pet.id}/${personality.id}`).toBe(true);
+        expect(PET_PERSONALITIES, personality.id).toContain(personality.id);
+        // Traits come from the fixed vocabulary, so no arbitrary tag can slip in.
+        for (const trait of personality.traits) {
+          expect(PET_PERSONALITY_TRAITS, trait).toContain(trait);
+        }
+        // Hints stay small and valid; nothing here could carry a prompt or a URL.
+        if (personality.hints?.restingState !== undefined)
+          expect(PET_STATES, pet.id).toContain(personality.hints.restingState);
+        if (personality.hints?.motionLevel !== undefined)
+          expect(PET_PERSONALITY_MOTION_LEVELS, pet.id).toContain(personality.hints.motionLevel);
+      }
+    }
+  });
+
+  it("gives every selectable pet exactly one default personality it actually offers", () => {
+    for (const pet of listAvailablePets()) {
+      const fallback = defaultPersonalityForPet(pet.id);
+      expect(fallback.id, pet.id).toBe(pet.defaultPersonality);
+      expect(listPersonalitiesForPet(pet.id).some((p) => p.id === fallback.id), pet.id).toBe(true);
+    }
+    // An unknown pet still resolves to a real default instead of throwing.
+    expect(isPetPersonality(defaultPersonalityForPet("nope"))).toBe(true);
+  });
+
+  it("keeps personality ids unique within a pet", () => {
+    for (const pet of PET_CATALOG) {
+      const ids = listPersonalitiesForPet(pet.id).map((p) => p.id);
+      expect(new Set(ids).size, pet.id).toBe(ids.length);
+    }
+  });
+
+  it("resolves a valid personality for the pet that offers it", () => {
+    expect(resolvePersonalityForPet(DEFAULT_PET_ID, "sleepy").id).toBe("sleepy");
+    expect(findPersonalityForPet("ember-fox", "playful")?.id).toBe("playful");
+  });
+
+  it("resolves a missing or invalid personality to that pet's default", () => {
+    expect(resolvePersonalityForPet("ember-fox", null).id).toBe("curious");
+    expect(resolvePersonalityForPet("ember-fox", "disco").id).toBe("curious");
+    expect(resolvePersonalityForPet("ember-fox", 42).id).toBe("curious");
+    expect(resolvePersonalityForPet(DEFAULT_PET_ID, undefined).id).toBe("calm");
+  });
+
+  it("rejects a personality that belongs to another pet", () => {
+    // "playful" is the fox's and the rabbit's, not the cat's.
+    expect(findPersonalityForPet(DEFAULT_PET_ID, "playful")).toBeNull();
+    expect(isSelectablePersonality(DEFAULT_PET_ID, "playful")).toBe(false);
+    // "sleepy" is the cat's and the rabbit's, not the fox's.
+    expect(isSelectablePersonality("ember-fox", "sleepy")).toBe(false);
+    // Unknown ids are not selectable for anyone.
+    expect(isSelectablePersonality(DEFAULT_PET_ID, "disco")).toBe(false);
+    expect(isSelectablePersonality("nope", "calm")).toBe(false);
+  });
+
+  it("never lets an unavailable pet have a personality selected", () => {
+    // Pip declares personalities, but is not offered, so none of them are selectable.
+    expect(listPersonalitiesForPet("pip-rabbit").length).toBeGreaterThan(0);
+    expect(isSelectablePersonality("pip-rabbit", "playful")).toBe(false);
+    expect(isSelectablePersonality("pip-rabbit", "sleepy")).toBe(false);
   });
 });

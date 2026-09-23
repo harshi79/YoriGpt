@@ -2,9 +2,12 @@ import "server-only";
 import {
   DEFAULT_PET_ID,
   defaultAppearanceForPet,
+  defaultPersonalityForPet,
   isSelectableAppearance,
+  isSelectablePersonality,
   isSelectablePetId,
   resolveAppearanceForPet,
+  resolvePersonalityForPet,
 } from "@/features/pets/catalog";
 import { getDb } from "../db/client";
 
@@ -16,6 +19,14 @@ import { getDb } from "../db/client";
  * validated against the catalog for the user's currently selected pet.
  */
 const PET_APPEARANCE_KEY = "petAppearance";
+
+/**
+ * The personality is stored the same way, beside the appearance and the selected pet:
+ * one stable catalog key in the same `uiPreferences` object. Only the key is kept —
+ * never the personality object, its traits, or anything resembling a prompt — and it
+ * is always validated against the catalog for the user's currently selected pet.
+ */
+const PET_PERSONALITY_KEY = "petPersonality";
 
 /**
  * The signed-in user's pet companion preference, stored in the existing
@@ -100,31 +111,54 @@ async function readUiPreferences(userId: string): Promise<Record<string, unknown
 
 /** The raw stored appearance key for one user, or `null` when nothing is stored. */
 export async function getPetAppearanceKey(userId: string): Promise<string | null> {
-  const prefs = await readUiPreferences(userId);
-  const value = prefs[PET_APPEARANCE_KEY];
-  return typeof value === "string" && value !== "" ? value : null;
+  return keyFrom(await readUiPreferences(userId), PET_APPEARANCE_KEY);
+}
+
+/** The raw stored personality key for one user, or `null` when nothing is stored. */
+export async function getPetPersonalityKey(userId: string): Promise<string | null> {
+  return keyFrom(await readUiPreferences(userId), PET_PERSONALITY_KEY);
 }
 
 /**
  * The companion the pages render: the stored, still-available pet plus the stored
- * appearance resolved for that pet (its default when missing, unknown, or from
- * another pet). Anonymous users get the catalog defaults without a database read.
+ * appearance and personality resolved for that pet (each one's default when missing,
+ * unknown, or from another pet). Anonymous users get the catalog defaults without a
+ * database read.
  */
 export async function loadCompanion(user: { id: string } | null): Promise<{
   pet: string;
   appearance: string;
+  personality: string;
 }> {
-  if (!user) {
-    return { pet: DEFAULT_PET_ID, appearance: defaultAppearanceForPet(DEFAULT_PET_ID).id };
-  }
+  if (!user) return defaultCompanion();
   try {
     const pet = await resolveSelectedPetKey(user.id);
-    const stored = await getPetAppearanceKey(user.id);
-    return { pet, appearance: resolveAppearanceForPet(pet, stored).id };
+    // One read serves both keys, so the two preferences can never disagree.
+    const prefs = await readUiPreferences(user.id);
+    return {
+      pet,
+      appearance: resolveAppearanceForPet(pet, keyFrom(prefs, PET_APPEARANCE_KEY)).id,
+      personality: resolvePersonalityForPet(pet, keyFrom(prefs, PET_PERSONALITY_KEY)).id,
+    };
   } catch (error) {
     console.error("[pets] Failed to load the companion:", error);
-    return { pet: DEFAULT_PET_ID, appearance: defaultAppearanceForPet(DEFAULT_PET_ID).id };
+    return defaultCompanion();
   }
+}
+
+/** The catalog-default companion, used for anonymous visitors and failed reads. */
+function defaultCompanion(): { pet: string; appearance: string; personality: string } {
+  return {
+    pet: DEFAULT_PET_ID,
+    appearance: defaultAppearanceForPet(DEFAULT_PET_ID).id,
+    personality: defaultPersonalityForPet(DEFAULT_PET_ID).id,
+  };
+}
+
+/** A non-empty string stored under a key, or `null`. */
+function keyFrom(prefs: Record<string, unknown>, key: string): string | null {
+  const value = prefs[key];
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 export type SaveAppearanceResult =
@@ -153,4 +187,38 @@ export async function savePetAppearance(
     select: { userId: true },
   });
   return { ok: true, pet, appearance: appearanceId };
+}
+
+export type SavePersonalityResult =
+  | { ok: true; pet: string; personality: string }
+  | { ok: false; reason: "invalid-personality" };
+
+/**
+ * Stores one personality key for the signed-in user, validated against their
+ * currently selected pet — so a personality that belongs to another pet, or an
+ * unknown/unavailable one, is refused rather than persisted. Only the
+ * `petPersonality` property of `uiPreferences` is written; the stored appearance,
+ * every other property of the object, and the `selectedPetKey`/`theme`/model columns
+ * all keep their values.
+ */
+export async function savePetPersonality(
+  userId: string,
+  personalityId: string,
+): Promise<SavePersonalityResult> {
+  const pet = await resolveSelectedPetKey(userId);
+  if (!isSelectablePersonality(pet, personalityId))
+    return { ok: false, reason: "invalid-personality" };
+
+  const existing = await readUiPreferences(userId);
+  await getDb().userPreferences.upsert({
+    where: { userId },
+    create: {
+      userId,
+      selectedPetKey: pet,
+      uiPreferences: { ...existing, [PET_PERSONALITY_KEY]: personalityId },
+    },
+    update: { uiPreferences: { ...existing, [PET_PERSONALITY_KEY]: personalityId } },
+    select: { userId: true },
+  });
+  return { ok: true, pet, personality: personalityId };
 }

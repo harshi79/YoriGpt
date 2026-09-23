@@ -44,12 +44,15 @@ export function EmptyState({
   onChoosePrompt,
   companionPetKey,
   companionAppearanceKey,
+  companionPersonalityKey,
 }: {
   onChoosePrompt: (draft: string) => void;
   /** The signed-in user's stored companion; the catalog default otherwise. */
   companionPetKey?: string;
   /** The stored appearance for that pet; its default when absent or unknown. */
   companionAppearanceKey?: string;
+  /** The stored personality for that pet; its default when absent or unknown. */
+  companionPersonalityKey?: string;
 }) {
   const pet = resolvePet(companionPetKey ?? DEFAULT_PET_ID);
   return (
@@ -60,14 +63,17 @@ export function EmptyState({
           <span className="symbol-spark" />
         </div>
         {/* The pet framework's only appearance in the chat: a static companion, idle
-            and small, beside the mark. It shows the signed-in user's stored pet and
-            appearance (the defaults for everyone else), holds no state of its own,
-            knows nothing about the conversation, and is not connected to replies or
-            streaming. The renderer owns the single accessible label. */}
+            and small, beside the mark. It shows the signed-in user's stored pet,
+            appearance, and personality (the defaults for everyone else), holds no
+            state of its own, knows nothing about the conversation, and is not
+            connected to replies or streaming. The personality rides along as data the
+            renderer exposes; it changes no message and reaches no AI call. The
+            renderer owns the single accessible label. */}
         <PetRenderer
           className="welcome-pet"
           pet={pet}
           appearance={companionAppearanceKey}
+          personality={companionPersonalityKey}
           state={INITIAL_PET_STATE}
           size="sm"
         />

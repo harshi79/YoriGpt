@@ -3,6 +3,8 @@ import {
   isPetDefinition,
   type PetAppearance,
   type PetDefinition,
+  type PetPersonality,
+  type PetPersonalityDefinition,
 } from "./types";
 
 /**
@@ -20,6 +22,47 @@ import {
  * `available: false` follows the model catalog's convention for an entry that is
  * kept but not offered.
  */
+/**
+ * The personality library: the only place personalities are *defined*. Each entry is
+ * a behaviour definition — a stable id, a display name, one short line, and a few
+ * tags from the fixed trait vocabulary — never a prompt, and never anything a client
+ * can supply. Pets below reference these by key, so a personality is written once and
+ * a pet that offers it cannot drift from its definition.
+ *
+ * Typing the record as `Record<PetPersonality, …>` makes the set exhaustive: adding an
+ * id to `PET_PERSONALITIES` without defining it here is a compile error.
+ */
+const PERSONALITY_LIBRARY: Record<PetPersonality, PetPersonalityDefinition> = {
+  calm: {
+    id: "calm",
+    name: "Calm",
+    description: "Settled and unhurried; happy to simply keep you company.",
+    traits: ["gentle", "independent"],
+    hints: { restingState: "idle", motionLevel: "low" },
+  },
+  playful: {
+    id: "playful",
+    name: "Playful",
+    description: "Quick to perk up and always ready for a small distraction.",
+    traits: ["energetic", "sociable"],
+    hints: { restingState: "happy", motionLevel: "high" },
+  },
+  curious: {
+    id: "curious",
+    name: "Curious",
+    description: "Notices new ideas first and likes to look a little closer.",
+    traits: ["inquisitive", "energetic"],
+    hints: { restingState: "thinking", motionLevel: "medium" },
+  },
+  sleepy: {
+    id: "sleepy",
+    name: "Sleepy",
+    description: "Low-key and drowsy; prefers a quiet corner and a slow blink.",
+    traits: ["restful", "gentle"],
+    hints: { restingState: "sleeping", motionLevel: "low" },
+  },
+};
+
 export const PET_CATALOG: readonly PetDefinition[] = [
   {
     id: "yori-cat",
@@ -34,6 +77,8 @@ export const PET_CATALOG: readonly PetDefinition[] = [
       { id: "night", name: "Night", palette: "night", description: "A deeper, cooler coat for late sessions." },
       { id: "moss", name: "Moss", palette: "moss", description: "A soft green, like the cat rolled in the garden." },
     ],
+    // A small, deliberate subset: Yori is not offered the fox's `playful`.
+    personalities: [PERSONALITY_LIBRARY.calm, PERSONALITY_LIBRARY.sleepy, PERSONALITY_LIBRARY.curious],
   },
   {
     id: "ember-fox",
@@ -48,6 +93,8 @@ export const PET_CATALOG: readonly PetDefinition[] = [
       { id: "ember", name: "Flame", palette: "ember", description: "A brighter, fire-lit coat." },
       { id: "night", name: "Night", palette: "night", description: "A cool, dusk-toned fox." },
     ],
+    // No `sleepy` here, so a cat's sleepy choice is invalid for this pet.
+    personalities: [PERSONALITY_LIBRARY.curious, PERSONALITY_LIBRARY.playful],
   },
   {
     id: "pip-rabbit",
@@ -62,6 +109,7 @@ export const PET_CATALOG: readonly PetDefinition[] = [
       { id: "classic", name: "Classic", palette: "classic", description: "The original rabbit." },
       { id: "frost", name: "Frost", palette: "frost", description: "A pale, winter-white coat." },
     ],
+    personalities: [PERSONALITY_LIBRARY.playful, PERSONALITY_LIBRARY.sleepy],
   },
 ];
 
@@ -152,4 +200,60 @@ export function isSelectableAppearance(petId: unknown, appearanceId: unknown): b
  */
 export function resolveAppearanceForPet(petId: unknown, appearanceId: unknown): PetAppearance {
   return findAppearanceForPet(petId, appearanceId) ?? defaultAppearanceForPet(petId);
+}
+
+/**
+ * Personality lookups, following the same rules as appearances: the catalog is the
+ * single source of truth, a personality must belong to the pet that offers it, and
+ * every lookup degrades to that pet's declared default instead of throwing — so a
+ * stored or sent key that is missing, unknown, or from another pet can never break a
+ * page. Availability is checked the same way too: a pet that is not offered can never
+ * have a personality selected, however valid the id looks.
+ */
+
+/** A pet's declared personalities, in catalog order; an unknown pet yields none. */
+export function listPersonalitiesForPet(petId: unknown): PetPersonalityDefinition[] {
+  return [...(findPet(petId)?.personalities ?? [])];
+}
+
+/**
+ * The personality a pet starts with: the one its `defaultPersonality` names, or the
+ * first it declares. Never null, so a pet with a single personality still has a
+ * default and a malformed catalog entry still resolves to something real.
+ */
+export function defaultPersonalityForPet(petId: unknown): PetPersonalityDefinition {
+  const pet = findPet(petId);
+  const offered = pet?.personalities ?? [];
+  return (
+    offered.find((personality) => personality.id === pet?.defaultPersonality) ??
+    offered[0] ??
+    PERSONALITY_LIBRARY.calm
+  );
+}
+
+/** The personality for a pet by id, or `null` when that pet does not offer it. */
+export function findPersonalityForPet(
+  petId: unknown,
+  personalityId: unknown,
+): PetPersonalityDefinition | null {
+  if (typeof personalityId !== "string") return null;
+  return findPet(petId)?.personalities.find((personality) => personality.id === personalityId) ?? null;
+}
+
+/** True when the pet is offered *and* it lists that personality. */
+export function isSelectablePersonality(petId: unknown, personalityId: unknown): boolean {
+  const pet = findPet(petId);
+  return Boolean(pet?.available) && findPersonalityForPet(petId, personalityId) !== null;
+}
+
+/**
+ * The personality a page or companion should use for a pet: the requested one when the
+ * pet offers it, otherwise that pet's default. An id belonging to a different pet is
+ * simply not offered here, so it falls back — the API rejects it separately.
+ */
+export function resolvePersonalityForPet(
+  petId: unknown,
+  personalityId: unknown,
+): PetPersonalityDefinition {
+  return findPersonalityForPet(petId, personalityId) ?? defaultPersonalityForPet(petId);
 }

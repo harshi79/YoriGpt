@@ -139,7 +139,12 @@ describe("the pet appearance service", () => {
       selectedPetKey: "ember-fox",
       uiPreferences: { petAppearance: "ember" },
     });
-    expect(await loadCompanion({ id: userId })).toEqual({ pet: "ember-fox", appearance: "ember" });
+    // `loadCompanion` now also resolves the personality; the fox's own default here.
+    expect(await loadCompanion({ id: userId })).toEqual({
+      pet: "ember-fox",
+      appearance: "ember",
+      personality: "curious",
+    });
   });
 
   it("loadCompanion falls back to the pet default for an invalid stored appearance", async () => {
@@ -155,9 +160,17 @@ describe("the pet appearance service", () => {
   });
 
   it("loadCompanion uses defaults for anonymous users and never throws on failure", async () => {
-    expect(await loadCompanion(null)).toEqual({ pet: DEFAULT_PET_ID, appearance: "classic" });
+    expect(await loadCompanion(null)).toEqual({
+      pet: DEFAULT_PET_ID,
+      appearance: "classic",
+      personality: "calm",
+    });
 
     fake.state.failWith = new Error("db down");
-    expect(await loadCompanion({ id: userId })).toEqual({ pet: DEFAULT_PET_ID, appearance: "classic" });
+    expect(await loadCompanion({ id: userId })).toEqual({
+      pet: DEFAULT_PET_ID,
+      appearance: "classic",
+      personality: "calm",
+    });
   });
 });

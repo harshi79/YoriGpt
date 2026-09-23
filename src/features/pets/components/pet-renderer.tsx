@@ -1,5 +1,5 @@
 import { petTreatment } from "../animations";
-import { resolveAppearanceForPet } from "../catalog";
+import { resolveAppearanceForPet, resolvePersonalityForPet } from "../catalog";
 import { INITIAL_PET_STATE, toPetState, type PetState } from "../state";
 import {
   DEFAULT_PET_SIZE,
@@ -19,6 +19,12 @@ type Props = {
   size?: PetSize;
   /** A catalog appearance id; unknown or other-pet values fall back to the default. */
   appearance?: string;
+  /**
+   * A catalog personality id, carried only as `data-personality` so future behavior
+   * tasks have a resolved value to read. It changes nothing here yet: no pose, no
+   * animation, no label — the renderer holds no personality logic.
+   */
+  personality?: string;
   /** Extra class for the place the pet is rendered (the chat empty state uses one). */
   className?: string;
   /** Overrides the default "Name, a species" label. */
@@ -45,6 +51,7 @@ export function PetRenderer({
   state = INITIAL_PET_STATE,
   size = DEFAULT_PET_SIZE,
   appearance,
+  personality,
   className = "",
   label,
 }: Props) {
@@ -68,6 +75,9 @@ export function PetRenderer({
   // The palette a fixed stylesheet knows how to paint; an unknown or other-pet
   // appearance resolves to the pet's default look, never to arbitrary styling.
   const appearancePalette = usable ? resolveAppearanceForPet(usable.id, appearance).palette : "";
+  // Resolved for the pet that is actually drawn, so a personality from another pet can
+  // never appear on screen. Presentational only: nothing below reads it yet.
+  const personalityId = usable ? resolvePersonalityForPet(usable.id, personality).id : "";
 
   return (
     <figure
@@ -77,6 +87,7 @@ export function PetRenderer({
       data-state={resolvedState}
       data-pet={usable?.id ?? ""}
       data-appearance={appearancePalette}
+      data-personality={personalityId}
       data-motion={treatment.moves ? "on" : "off"}
     >
       <span className="pet-stage">

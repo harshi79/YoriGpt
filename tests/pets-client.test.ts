@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { requestPetSelection, requestPetAppearance } = await import(
+const { requestPetSelection, requestPetAppearance, requestPetPersonality } = await import(
   "../src/features/pets/client"
 );
 
@@ -120,6 +120,56 @@ describe("the pet appearance client", () => {
       throw new TypeError("network down");
     });
     await expect(requestPetAppearance("night")).resolves.toEqual({
+      ok: false,
+      status: 0,
+      message: "We couldn’t reach the server. Check your connection and try again.",
+    });
+  });
+});
+
+describe("the pet personality client", () => {
+  it("sends only the personality key in a same-origin PUT", async () => {
+    const calls = stubFetch(() => json({ pet: "yori-cat", personality: "sleepy" }));
+
+    await expect(requestPetPersonality("sleepy")).resolves.toEqual({
+      ok: true,
+      pet: "yori-cat",
+      personality: "sleepy",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("/api/settings/pet/personality");
+    expect(calls[0].init.method).toBe("PUT");
+    expect(calls[0].init.credentials).toBe("same-origin");
+    // No user id, nothing but the personality key — never a personality object.
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ personality: "sleepy" });
+  });
+
+  it("surfaces the server's message when a personality is refused", async () => {
+    stubFetch(() =>
+      json(
+        { error: { code: "INVALID_REQUEST", message: "That personality is not available for this pet." } },
+        400,
+      ),
+    );
+    await expect(requestPetPersonality("playful")).resolves.toEqual({
+      ok: false,
+      status: 400,
+      message: "That personality is not available for this pet.",
+    });
+  });
+
+  it("refuses to treat an unexpected response as a saved personality", async () => {
+    stubFetch(() => json({ pet: "yori-cat", personality: "" }));
+    const result = await requestPetPersonality("sleepy");
+    expect(result.ok).toBe(false);
+  });
+
+  it("reports a failed request without pretending the personality changed", async () => {
+    stubFetch(() => {
+      throw new TypeError("network down");
+    });
+    await expect(requestPetPersonality("sleepy")).resolves.toEqual({
       ok: false,
       status: 0,
       message: "We couldn’t reach the server. Check your connection and try again.",

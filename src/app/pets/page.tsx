@@ -55,13 +55,14 @@ export default async function PetsPage() {
           <h2 id="pets-stage-heading">Companions</h2>
           <p className="settings-card-intro">
             {user
-              ? "Choose a pet, an appearance, and a mood to see how it is drawn. Your pet and appearance are saved to your account; mood and size are just for this visit."
-              : "Choose a pet, an appearance, and a mood to see how it is drawn. The choice stays on this device until you sign in."}
+              ? "Choose a pet, an appearance, a personality, and a mood to see how it is drawn. Your pet, appearance, and personality are saved to your account; mood and size are just for this visit."
+              : "Choose a pet, an appearance, a personality, and a mood to see how it is drawn. The choice stays on this device until you sign in."}
           </p>
           <PetPlayground
             pets={listAvailablePets()}
             initialPetId={companion.pet}
             initialAppearanceId={companion.appearance}
+            initialPersonalityId={companion.personality}
             canPersist={Boolean(user)}
           />
           <p className="settings-note">

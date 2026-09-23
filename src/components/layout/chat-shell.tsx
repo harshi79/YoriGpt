@@ -50,6 +50,8 @@ type Props = {
   companionPetKey?: string;
   /** The stored appearance for that pet; its default when absent or unknown. */
   companionAppearanceKey?: string;
+  /** The stored personality for that pet; its default when absent or unknown. */
+  companionPersonalityKey?: string;
 };
 
 export function ChatShell({
@@ -60,6 +62,7 @@ export function ChatShell({
   messages = EMPTY_MESSAGE_LIST,
   companionPetKey,
   companionAppearanceKey,
+  companionPersonalityKey,
 }: Props) {
   const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
@@ -494,6 +497,7 @@ export function ChatShell({
             <EmptyState
               companionPetKey={companionPetKey}
               companionAppearanceKey={companionAppearanceKey}
+              companionPersonalityKey={companionPersonalityKey}
               onChoosePrompt={(value) => {
                 setDraft(value);
                 main.current?.querySelector("textarea")?.focus();

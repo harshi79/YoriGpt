@@ -10,18 +10,91 @@
  * `user_preferences.selectedPetKey` column (see `docs/database.md`).
  */
 
+import type { PetState } from "./state";
+
 /** Species in the placeholder catalog. A new species adds one member here. */
 export const PET_SPECIES = ["cat", "fox", "rabbit"] as const;
 
 export type PetSpecies = (typeof PET_SPECIES)[number];
 
 /**
- * Personality is metadata only at this step: the catalog declares a default per
- * pet so later tasks have somewhere to hang behavior. Nothing reads it yet.
+ * Every personality the catalog defines. This is the closed set of stable ids: a
+ * pet may offer a subset, and only one of these ids is ever persisted or sent by a
+ * client — never a personality object, and never a natural-language prompt.
  */
-export const PET_PERSONALITIES = ["calm", "playful", "curious"] as const;
+export const PET_PERSONALITIES = ["calm", "playful", "curious", "sleepy"] as const;
 
 export type PetPersonality = (typeof PET_PERSONALITIES)[number];
+
+/**
+ * Behaviour tags a personality carries. A fixed, code-owned vocabulary so traits stay
+ * comparable and machine-readable: they describe tendencies for future behavior tasks
+ * to branch on, not prose to feed a model.
+ */
+export const PET_PERSONALITY_TRAITS = [
+  "gentle",
+  "energetic",
+  "inquisitive",
+  "restful",
+  "sociable",
+  "independent",
+] as const;
+
+export type PetPersonalityTrait = (typeof PET_PERSONALITY_TRAITS)[number];
+
+/** How much movement a personality implies. A hint only; nothing animates it yet. */
+export const PET_PERSONALITY_MOTION_LEVELS = ["low", "medium", "high"] as const;
+
+export type PetPersonalityMotionLevel = (typeof PET_PERSONALITY_MOTION_LEVELS)[number];
+
+/**
+ * Optional, deliberately tiny hooks for later behavior tasks. Nothing consumes these
+ * yet, and they must stay small and code-owned: no prompt text, no asset or URL, no
+ * arbitrary values a client could supply.
+ */
+export type PetPersonalityHints = {
+  /** The state this personality tends toward when it has nothing to do. */
+  restingState?: PetState;
+  /** How much movement the personality implies. */
+  motionLevel?: PetPersonalityMotionLevel;
+};
+
+/**
+ * A behaviour definition, not an AI prompt. Catalog-defined and identified by a
+ * stable id; the display name, one-line description, and trait tags are metadata for
+ * the UI and for future behavior code.
+ */
+export type PetPersonalityDefinition = {
+  /** Stable key within this pet's personality list; what gets persisted. */
+  id: PetPersonality;
+  /** Human-readable name shown in the playground. */
+  name: string;
+  /** One short line. Never a system prompt. */
+  description: string;
+  /** A small set of behaviour tags from the fixed vocabulary. */
+  traits: readonly PetPersonalityTrait[];
+  /** Optional hints a later task may consume. */
+  hints?: PetPersonalityHints;
+};
+
+/** True for a value shaped like a catalog personality. */
+export function isPetPersonality(value: unknown): value is PetPersonalityDefinition {
+  if (typeof value !== "object" || value === null) return false;
+  const personality = value as Partial<PetPersonalityDefinition>;
+  return (
+    isString(personality.id) &&
+    (PET_PERSONALITIES as readonly string[]).includes(personality.id) &&
+    isString(personality.name) &&
+    personality.name !== "" &&
+    isString(personality.description) &&
+    Array.isArray(personality.traits) &&
+    personality.traits.every(
+      (trait) =>
+        typeof trait === "string" &&
+        (PET_PERSONALITY_TRAITS as readonly string[]).includes(trait),
+    )
+  );
+}
 
 /**
  * Silhouettes the renderer knows how to draw inline. The registry in
@@ -93,13 +166,15 @@ export type PetDefinition = {
   species: PetSpecies;
   /** One short line shown with the pet. */
   description: string;
-  /** Declared now, unused until personality exists. */
+  /** The personality this pet starts with; must be one of `personalities`. */
   defaultPersonality: PetPersonality;
   /** Unavailable pets stay in the catalog but are never offered or drawn. */
   available: boolean;
   asset: PetAsset;
   /** The looks this pet can wear; always includes the default. */
   appearances: readonly PetAppearance[];
+  /** The personalities this pet can have; always includes `defaultPersonality`. */
+  personalities: readonly PetPersonalityDefinition[];
 };
 
 /** Rendered sizes. Pixels live in the stylesheet, not here. */
@@ -153,7 +228,13 @@ export function isPetDefinition(value: unknown): value is PetDefinition {
     isPetAsset(pet.asset) &&
     Array.isArray(pet.appearances) &&
     pet.appearances.length > 0 &&
-    pet.appearances.every(isPetAppearance)
+    pet.appearances.every(isPetAppearance) &&
+    Array.isArray(pet.personalities) &&
+    pet.personalities.length > 0 &&
+    pet.personalities.every(isPetPersonality) &&
+    // The declared default must actually be one this pet offers, so a pet can never
+    // resolve to a personality it does not have.
+    pet.personalities.some((personality) => personality.id === pet.defaultPersonality)
   );
 }
 

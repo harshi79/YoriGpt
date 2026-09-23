@@ -63,11 +63,13 @@ Verification stands alone: rows are keyed by identifier, not by user.
   `GET/PUT /api/settings/pet`, storing only a key the catalog marks available and
   resolving missing/unknown/retired values to the catalog default. No pet table or
   fabricated species data is added, and no migration exists or is needed. The pet
-  *appearance* is stored alongside it as a single stable key (`petAppearance`) inside
-  the existing non-sensitive `uiPreferences` JSON object — again no new column, table,
-  or migration — validated against the user's currently selected pet and resolved back
-  to that pet's default when missing, unknown, or from another pet. Only the selection
-  and appearance are stored; pet mood, size, and personality are not. Future
+  *appearance* and *personality* are stored alongside it as single stable keys
+  (`petAppearance`, `petPersonality`) inside the same existing non-sensitive
+  `uiPreferences` JSON object — again no new column, table, or migration — each
+  validated against the user's currently selected pet and resolved back to that pet's
+  default when missing, unknown, or from another pet. Only these three keys are stored;
+  pet mood and size are not. A personality is persisted as its catalog key only — never
+  the personality object, its traits, or anything resembling a prompt. Future
   pet/accessibility options can use the non-sensitive `uiPreferences` object. Future
   writers must validate allowed keys, payload size, and versions; never store tokens,
   credentials, or behavioral state here.
@@ -288,18 +290,19 @@ server configuration only.
   request, a theme change updating the existing row without disturbing its
   `preferredModelId`, and invalid or unauthorized bodies writing nothing.
 - **The pet framework and its persistence added no schema change at all.** The render
-  layer (catalog, renderer, state, appearances) lives in `src/features/pets/`, and the
-  persisted selection reuses the existing `user_preferences.selectedPetKey` column
-  exactly as the initial migration created it, while the appearance reuses the existing
-  non-sensitive `uiPreferences` JSON object (property `petAppearance`):
+  layer (catalog, renderer, state, appearances, personalities) lives in
+  `src/features/pets/`, and the persisted selection reuses the existing
+  `user_preferences.selectedPetKey` column exactly as the initial migration created it,
+  while the appearance and personality reuse the existing non-sensitive `uiPreferences`
+  JSON object (properties `petAppearance` and `petPersonality`):
   `src/server/pets/service.ts` upserts only those fields, keyed by the authenticated
   user, and reads them back through the shared Prisma client. No table, column, index,
   or migration was added. The database suite checks it against real sessions: the
   catalog default with no row, a valid available pet written for that user only,
   unavailable/unknown/unexpected/untrusted bodies writing nothing, a pet change leaving
   the row's theme/model columns alone, one account unable to write another's stored
-  pet, and the appearance stored as a single validated key that leaves the selection
-  and other preferences intact.
+  pet, and the appearance and personality each stored as a single validated key that
+  leaves the selection, the other key, and every other preference intact.
 - **OpenRouter key rotation added no schema change either.** Which of the configured
   keys signs a request, and which keys are cooling down after the provider rejected
   them, live in the server process's memory (`src/server/ai/key-pool/`). There is no

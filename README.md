@@ -498,27 +498,31 @@ No Prisma call is made from a component or a route handler, no new table or colu
 was added, and only the `theme` column is written — the model, pet, and UI
 preference columns of the same row keep their values.
 
-**Scope.** The persisted settings are the theme and the pet companion (its selection
-and appearance). Account editing, password or email changes, account deletion,
-billing, and usage tracking do not exist and are not stubbed. Pet *personalities and
-reactions* are not implemented — which companion is selected and which of its
-catalog-defined appearances is chosen are stored (see the next section).
+**Scope.** The persisted settings are the theme and the pet companion (its selection,
+appearance, and personality). Account editing, password or email changes, account
+deletion, billing, and usage tracking do not exist and are not stubbed. Pet
+*personalities* exist as catalog-defined behavior metadata only: they are stored and
+displayed, but drive no animation, no chat reaction, and no AI behavior. Reactions are
+not implemented (see the next section).
 
 ## Pet framework
 
 A small, reusable foundation for interactive 2D companions, kept entirely inside
 `src/features/pets/` (plus a thin server preference service) so chat components never
 hold pet logic. It is deliberately a *framework*: types, catalog, state vocabulary, a
-renderer, lightweight CSS animations, and a persisted per-account selection — no AI
-connection, no finished artwork, no personalities or reactions yet.
+renderer, lightweight CSS animations, and a persisted per-account selection,
+appearance, and personality — no AI connection, no finished artwork, and no reactions.
 
 - **Architecture.** `types.ts` declares the domain (`id`, `name`, `species`,
-  `description`, `defaultPersonality`, `available`, an abstract `asset` reference, and
-  a list of catalog-defined `appearances`). `catalog.ts` is the single list of pets
-  plus `findPet` / `listAvailablePets` / `resolvePet` (which falls back to an available
-  default instead of throwing) and the appearance helpers `listAppearancesForPet` /
+  `description`, `defaultPersonality`, `available`, an abstract `asset` reference, a
+  list of catalog-defined `appearances`, and a list of catalog-defined
+  `personalities`). `catalog.ts` is the single list of pets plus `findPet` /
+  `listAvailablePets` / `resolvePet` (which falls back to an available default instead
+  of throwing), the appearance helpers `listAppearancesForPet` /
   `defaultAppearanceForPet` / `findAppearanceForPet` / `isSelectableAppearance` /
-  `resolveAppearanceForPet`.
+  `resolveAppearanceForPet`, and the matching personality helpers
+  `listPersonalitiesForPet` / `defaultPersonalityForPet` / `findPersonalityForPet` /
+  `isSelectablePersonality` / `resolvePersonalityForPet`.
   `state.ts` holds the state vocabulary; `animations.ts` holds what each state looks
   like (two CSS classes plus whether it moves), so behavior, vocabulary, and markup
   stay in separate files. `components/` has the presentational `PetRenderer`, the
@@ -541,14 +545,29 @@ connection, no finished artwork, no personalities or reactions yet.
   small and safe — no arbitrary CSS, no external or user-uploaded assets; the palette
   only re-tints the existing silhouette through CSS variables. Only the appearance
   `id` is ever sent by a client or stored.
-- **Renderer.** `<PetRenderer pet appearance state size className label />` renders any
-  catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name (`role="img"`, e.g.
-  "Yori, a cat"), marks the drawing `aria-hidden`, and carries the state as
-  `data-state` and the resolved appearance palette as `data-appearance` — it is not a
-  live region, so mood or appearance changes never announce themselves. A missing or
-  invalid appearance resolves to the pet's default. An unavailable or malformed pet
-  degrades to a labelled placeholder rather than throwing. It is pure presentational
-  React: no timer, effect, network, or storage.
+- **Personalities.** A personality is a **behavior definition, not an AI prompt**. Each
+  one is catalog-defined with a stable `id` from a closed set (`calm`, `playful`,
+  `curious`, `sleepy`), a display `name`, a one-line `description`, a few tags from a
+  fixed trait vocabulary (`gentle`, `energetic`, `inquisitive`, `restful`, `sociable`,
+  `independent`), and optional tiny `hints` (`restingState`, `motionLevel`) for later
+  behavior tasks. No prompt text, no asset or URL, and nothing a client can supply.
+  Definitions live in one library in `catalog.ts` that pets reference, so a personality
+  is written once; each pet offers a small subset and declares exactly one default
+  (Yori: calm/sleepy/curious, Ember: curious/playful, Pip: playful/sleepy but never
+  selectable). `isSelectablePersonality` allows an id only for an available pet that
+  lists it, and `resolvePersonalityForPet` maps a missing, unknown, or other-pet id
+  back to that pet's default. **Nothing consumes personalities yet**: no
+  personality-specific animation, no chat reaction, no system prompt.
+- **Renderer.** `<PetRenderer pet appearance personality state size className label />`
+  renders any catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name
+  (`role="img"`, e.g. "Yori, a cat"), marks the drawing `aria-hidden`, and carries the
+  state as `data-state`, the resolved appearance palette as `data-appearance`, and the
+  resolved personality as `data-personality` — it is not a live region, so a mood,
+  appearance, or personality change never announces itself. A missing or invalid
+  appearance or personality resolves to the pet's default. The personality attribute is
+  a passive hook for future behavior tasks: it changes no pose, animation, or label. An
+  unavailable or malformed pet degrades to a labelled placeholder rather than throwing.
+  It is pure presentational React: no timer, effect, network, or storage.
 - **Animations & reduced motion.** Idle breathing, a happy bounce, a thinking
   head-tilt with thought dots, a sleeping doze with drifting `z` marks, and an
   excited wiggle with sparkles — all plain CSS keyframes under
@@ -576,20 +595,34 @@ connection, no finished artwork, no personalities or reactions yet.
   `{ "appearance": "<id>" }` — with the same session, trusted-origin, and error
   conventions. The separate selection route (`GET/PUT /api/settings/pet`) keeps its
   exact `{ "pet" }` shape.
+- **Persistent personality.** Stored the same way, beside the appearance: one stable
+  catalog key (`petPersonality`) inside the same `uiPreferences` JSON object — again no
+  new column, table, or migration, and never the personality object, its traits, or
+  anything resembling a prompt. `savePetPersonality` validates the id against the
+  user's *currently selected* pet (so an id from another pet, an unknown id, or an
+  unavailable pet is refused), writes only that property, and leaves `selectedPetKey`,
+  the stored appearance, and every other preference intact; reads resolve an invalid
+  stored value back to the pet's default. Exposed as `GET/PUT
+  /api/settings/pet/personality` — `GET` answers `{ "pet", "personality" }`, `PUT`
+  accepts exactly `{ "personality": "<id>" }` — with the same session, trusted-origin,
+  and error conventions. Selection, appearance, and personality stay logically separate
+  routes.
 - **`/pets` playground.** A public page that shows the available pets, the current
-  selection, and appearance/state/size controls driving the renderer. The appearance
-  control lists only the selected pet's appearances and switches to that pet's default
-  when the pet changes to one that lacks the current appearance. A signed-in visitor is
-  shown their stored companion and appearance, and choosing either saves it
-  optimistically (drawn immediately, confirmed by the server, rolled back with a short
-  note on failure — no spinner); reloading keeps both. An anonymous visitor gets the
-  full playground but the choices stay in the tab and never touch the database. Mood
-  and size remain local demo controls for everyone and are never persisted.
+  selection, and appearance/personality/state/size controls driving the renderer. The
+  appearance and personality controls list only what the selected pet offers and switch
+  to that pet's default when the pet changes to one that lacks the current choice; the
+  chosen personality is also stated in plain text under the pet. A signed-in visitor is
+  shown their stored companion, appearance, and personality, and choosing any of them
+  saves it optimistically (drawn immediately, confirmed by the server, rolled back with
+  a short note on failure — no spinner); reloading keeps all three. An anonymous visitor
+  gets the full playground but the choices stay in the tab and never touch the database.
+  Mood and size remain local demo controls for everyone and are never persisted.
 - **Chat integration.** The empty-state companion beside the welcome mark is the
-  signed-in user's stored pet and appearance (the catalog defaults for anonymous
-  visitors), loaded server-side and passed down as props — the chat stores nothing
-  pet-related itself. It is not connected to messages, replies, streaming, model
-  selection, or sentiment.
+  signed-in user's stored pet, appearance, and personality (the catalog defaults for
+  anonymous visitors), loaded server-side and passed down as props — the chat stores
+  nothing pet-related itself. The personality is carried as data only: it alters no
+  message, is never sent to OpenRouter, and is never turned into a system prompt. It is
+  not connected to messages, replies, streaming, model selection, or sentiment.
 
 ## Architecture
 

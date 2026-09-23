@@ -90,4 +90,28 @@ describe("the pet renderer", () => {
     const retired = findPet("pip-rabbit") as PetDefinition;
     expect(render(retired)).toContain('data-appearance=""');
   });
+
+  it("carries the resolved personality as data, defaulting to the pet's own", () => {
+    // Omitted: the cat's declared default, not an invented value.
+    expect(render(yori)).toContain('data-personality="calm"');
+    // Supplied and offered by this pet: carried through.
+    expect(render(yori, { personality: "sleepy" })).toContain('data-personality="sleepy"');
+  });
+
+  it("falls back to the pet default for an unknown or other-pet personality", () => {
+    expect(render(yori, { personality: "disco" })).toContain('data-personality="calm"');
+    // "playful" belongs to the fox, not the cat.
+    expect(render(yori, { personality: "playful" })).toContain('data-personality="calm"');
+  });
+
+  it("omits the personality on the missing-pet placeholder", () => {
+    const retired = findPet("pip-rabbit") as PetDefinition;
+    expect(render(retired)).toContain('data-personality=""');
+  });
+
+  it("keeps one accessible label whatever the personality", () => {
+    const html = render(yori, { personality: "curious" });
+    expect(html).toContain('aria-label="Yori, a cat"');
+    expect(html.match(/role="img"/g)?.length).toBe(1);
+  });
 });

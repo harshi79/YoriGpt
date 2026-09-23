@@ -14,6 +14,7 @@ import "server-only";
 /** The only field the client may send. */
 const PET_FIELD = "pet";
 const APPEARANCE_FIELD = "appearance";
+const PERSONALITY_FIELD = "personality";
 
 /** A whole body larger than this is refused before parsing. */
 export const MAX_PET_REQUEST_BYTES = 4_096;
@@ -83,4 +84,20 @@ export async function parsePetAppearanceRequest(
 ): Promise<ParsedAppearanceUpdate> {
   const parsed = await parseSingleStringField(request, APPEARANCE_FIELD, "pet appearance");
   return parsed.ok ? { ok: true, appearance: parsed.value } : parsed;
+}
+
+export type ParsedPersonalityUpdate =
+  | { ok: true; personality: string }
+  | { ok: false; message: string };
+
+/**
+ * Strict parsing for the personality request: exactly one field, `personality`. A
+ * personality *object* — with traits, hints, or prompt text — is not a string, so it
+ * is refused here rather than reaching the catalog check.
+ */
+export async function parsePetPersonalityRequest(
+  request: Request,
+): Promise<ParsedPersonalityUpdate> {
+  const parsed = await parseSingleStringField(request, PERSONALITY_FIELD, "pet personality");
+  return parsed.ok ? { ok: true, personality: parsed.value } : parsed;
 }
