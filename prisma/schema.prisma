@@ -1,0 +1,172 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum ModelProvider {
+  OPENROUTER
+  NVIDIA
+}
+
+enum ThemePreference {
+  SYSTEM
+  DARK
+  LIGHT
+}
+
+// Core identity fields match Better Auth's documented Prisma contract.
+// Auth-owned Session/Account/Verification models belong in the later auth migration.
+model User {
+  id            String           @id @default(cuid())
+  email         String           @unique @db.Citext
+  name          String
+  emailVerified Boolean          @default(false)
+  image         String?
+  status        UserStatus       @default(ACTIVE)
+  createdAt     DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime         @default(now()) @updatedAt @db.Timestamptz(3)
+  conversations Conversation[]
+  preferences   UserPreferences?
+  sessions      Session[]
+  accounts      Account[]
+
+  @@map("users")
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String    @default("New conversation") @db.VarChar(200)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @default(now()) @updatedAt @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  messages  Message[]
+
+  // Owner-filtered recent conversations, with a stable pagination tie-breaker.
+  @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           MessageRole
+  content        String       @db.Text
+  // Zero-based, assigned transactionally by future writers; not an ID or timestamp.
+  // The migration adds a PostgreSQL CHECK enforcing position >= 0.
+  position       Int
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @default(now()) @updatedAt @db.Timestamptz(3)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Also supports forward/reverse ordered message reads within a conversation.
+  @@unique([conversationId, position])
+  @@map("messages")
+}
+
+model AiModel {
+  id               String            @id @default(cuid())
+  provider         ModelProvider
+  modelIdentifier  String            @db.VarChar(255)
+  displayName      String            @db.VarChar(160)
+  isActive         Boolean           @default(false)
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime          @default(now()) @updatedAt @db.Timestamptz(3)
+  preferredByUsers UserPreferences[]
+
+  @@unique([provider, modelIdentifier])
+  @@index([isActive, provider, displayName, id])
+  @@map("ai_models")
+}
+
+model UserPreferences {
+  userId           String          @id
+  preferredModelId String?
+  theme            ThemePreference @default(SYSTEM)
+  // Stable key into a future, separately defined pet catalog; no assets/behavior here.
+  selectedPetKey   String?         @db.VarChar(100)
+  // Non-sensitive, versionable UI/accessibility/pet preferences; must be a JSON object.
+  // The migration supplies the jsonb_typeof CHECK Prisma cannot express.
+  uiPreferences    Json            @default("{}") @db.JsonB
+  createdAt        DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime        @default(now()) @updatedAt @db.Timestamptz(3)
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  preferredModel   AiModel?        @relation(fields: [preferredModelId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  // Supports FK maintenance when a catalog model is removed.
+  @@index([preferredModelId])
+  @@map("user_preferences")
+}
+
+// Better Auth core tables (see docs/authentication.md). Shapes are validated
+// against the installed library's schema in tests/auth-schema.test.ts.
+model Session {
+  id        String   @id
+  token     String   @unique
+  userId    String
+  expiresAt DateTime @db.Timestamptz(3)
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Only session deletion and "my sessions" listings are planned for now.
+  // Expired-session cleanup scans expiresAt; add an index only with that feature.
+  @@index([userId])
+  @@map("sessions")
+}
+
+// One row per authentication method. Email/password stores a Scrypt hash in
+// `password`; token columns stay null until a social provider is added.
+model Account {
+  id                    String    @id
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz(3)
+  refreshTokenExpiresAt DateTime? @db.Timestamptz(3)
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @default(now()) @db.Timestamptz(3) @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Better Auth looks accounts up by provider identity, one row per link.
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+// Short-lived single-use values: email-verification and password-reset tokens.
+// Rows are consumed on use and are not user-visible records.
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @default(now()) @db.Timestamptz(3) @updatedAt
+
+  @@index([identifier])
+  @@map("verifications")
+}
