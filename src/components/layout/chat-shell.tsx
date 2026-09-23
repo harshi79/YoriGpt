@@ -43,6 +43,13 @@ type Props = {
   conversation?: ConversationSummary | null;
   /** Server-loaded messages of that conversation, already owner-scoped. */
   messages?: MessageListState;
+  /**
+   * The signed-in user's stored companion for the empty-state pet; the catalog
+   * default for anonymous visitors. Loaded server-side, never stored in the shell.
+   */
+  companionPetKey?: string;
+  /** The stored appearance for that pet; its default when absent or unknown. */
+  companionAppearanceKey?: string;
 };
 
 export function ChatShell({
@@ -51,6 +58,8 @@ export function ChatShell({
   models,
   conversation = null,
   messages = EMPTY_MESSAGE_LIST,
+  companionPetKey,
+  companionAppearanceKey,
 }: Props) {
   const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
@@ -483,6 +492,8 @@ export function ChatShell({
             </section>
           ) : (
             <EmptyState
+              companionPetKey={companionPetKey}
+              companionAppearanceKey={companionAppearanceKey}
               onChoosePrompt={(value) => {
                 setDraft(value);
                 main.current?.querySelector("textarea")?.focus();

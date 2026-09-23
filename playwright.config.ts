@@ -8,6 +8,11 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:3100",
     browserName: "chromium",
+    // Pinned so the suite keeps exercising the palette it was written against.
+    // The application default theme is `system`, and a fresh Playwright context
+    // reports a light device preference; the settings spec emulates each scheme
+    // explicitly instead (see tests/e2e/settings.spec.ts).
+    colorScheme: "dark",
     // Optional local browser path for restricted development environments.
     launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
       ? {

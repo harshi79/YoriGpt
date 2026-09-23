@@ -1,3 +1,6 @@
+import { PetRenderer } from "../../features/pets/components/pet-renderer";
+import { DEFAULT_PET_ID, resolvePet } from "../../features/pets/catalog";
+import { INITIAL_PET_STATE } from "../../features/pets/state";
 import { Icon, YoriMark, type IconName } from "../ui/icon";
 
 const suggestions: {
@@ -39,14 +42,35 @@ const suggestions: {
 
 export function EmptyState({
   onChoosePrompt,
+  companionPetKey,
+  companionAppearanceKey,
 }: {
   onChoosePrompt: (draft: string) => void;
+  /** The signed-in user's stored companion; the catalog default otherwise. */
+  companionPetKey?: string;
+  /** The stored appearance for that pet; its default when absent or unknown. */
+  companionAppearanceKey?: string;
 }) {
+  const pet = resolvePet(companionPetKey ?? DEFAULT_PET_ID);
   return (
     <section className="empty-state" aria-labelledby="welcome-heading">
-      <div className="welcome-symbol">
-        <YoriMark />
-        <span className="symbol-spark" />
+      <div className="welcome-figure">
+        <div className="welcome-symbol">
+          <YoriMark />
+          <span className="symbol-spark" />
+        </div>
+        {/* The pet framework's only appearance in the chat: a static companion, idle
+            and small, beside the mark. It shows the signed-in user's stored pet and
+            appearance (the defaults for everyone else), holds no state of its own,
+            knows nothing about the conversation, and is not connected to replies or
+            streaming. The renderer owns the single accessible label. */}
+        <PetRenderer
+          className="welcome-pet"
+          pet={pet}
+          appearance={companionAppearanceKey}
+          state={INITIAL_PET_STATE}
+          size="sm"
+        />
       </div>
       <p className="eyebrow">A fresh conversation. A new possibility.</p>
       <h1 id="welcome-heading">

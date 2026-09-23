@@ -2,12 +2,16 @@
 
 A Node.js application foundation, responsive chat shell, PostgreSQL data
 foundation, email/password authentication, a **user-scoped conversation and message
-data flow**, and **streaming OpenRouter assistant replies** for YoriGPT. One
+data flow**, **streaming OpenRouter assistant replies**, and **account settings with
+a persistent theme preference** for YoriGPT. One
 server-side provider streams a reply for a stored user message over server-sent
 events while the browser renders it, and the finished answer is stored; several
 OpenRouter keys rotate with a short cooldown when one is refused or rate limited,
-while model selection, settings functionality, and pets still do not exist. The home route is an original
-charcoal-and-mint interface, ready for later service integration. The chat shell
+and now a foundational **interactive 2D pet framework** with a development
+playground with **persistent per-account pet selection** — while pet personalities,
+reactions, and other settings still do not exist. The home route is an original
+charcoal-and-mint interface — with a light palette behind the theme preference —
+ready for later service integration. The chat shell
 stays usable for signed-out visitors, but conversations belong to an authenticated
 account: they are created, listed, opened, and deleted only for their owner.
 
@@ -94,6 +98,10 @@ project dependencies. Browser binaries and screenshots are not committed.
   this deployment offers and the one that will write the next reply; choosing
   another stores it for the signed-in account immediately. Signed out, the catalog
   is listed with the default selected and choosing one routes to `/login`.
+- Settings entry in the sidebar's account area (signed in only), opening `/settings`
+  with the appearance preference and read-only account details (see
+  [Settings and theme preference](#settings-and-theme-preference)). Signed-out
+  visitors keep the existing guest area and no settings link.
 - Empty conversation with four draft starters. Choosing one populates and focuses
   the textarea; it does not send anything.
 - One explicitly labeled static conversation under **UI examples**, with user and
@@ -429,6 +437,160 @@ first delta.
 produced a reply — the change applies to future generations only. A stored
 conversation keeps loading exactly as before, and switching models never rewrites it.
 
+## Settings and theme preference
+
+`/settings` is an authenticated page: an anonymous visitor is redirected to
+`/login` by the same `requireUser()` guard the conversation routes use, so no
+settings data is ever rendered for someone who is not signed in. It is reached from
+the settings control in the sidebar's account area (desktop and mobile dialog), and
+it shows two sections:
+
+- **Appearance** — the theme preference, one of three values.
+- **Account** — the signed-in account's name (or `Not provided`), email, and email
+  verification status. All three are **read-only**: nothing on this page edits the
+  name, the email, or the password, and there is no account deletion, billing, or
+  usage information.
+
+| Wire value | Stored as (`user_preferences.theme`) | Behavior                                            |
+| ---------- | ------------------------------------ | --------------------------------------------------- |
+| `system`   | `SYSTEM`                             | Follows the device's `prefers-color-scheme` (**default**) |
+| `dark`     | `DARK`                               | Always the dark palette                              |
+| `light`    | `LIGHT`                              | Always the light palette                             |
+
+**Default theme.** `system`, which is the Prisma default of
+`user_preferences.theme` in the existing schema (`ThemePreference @default(SYSTEM)`).
+An account with no `user_preferences` row and one whose row was created by another
+feature — choosing a model writes the same row — therefore resolve to the same
+theme. Because `system` follows the device, an account that has never chosen a
+theme sees the light palette on a light-preferring device: the single dark palette
+of the earlier steps is still what `dark` (and `system` on a dark device) renders,
+and no rule of the dark design changed — see the verification note below.
+
+**Persistence.** PostgreSQL is the only source of truth. `PUT /api/settings`
+upserts the caller's `user_preferences.theme`; the root layout then reads that
+value per request and renders it as `data-theme` on `<html>`, so the choice survives
+a reload, a new tab, a logout/login, and navigation, and applies on every route.
+Nothing is kept in `localStorage`. A tiny inline script in `<head>` — before the
+first paint — resolves `system` into `data-color-scheme` and keeps following the
+device while the preference is `system`; `src/app/globals.css` keys both palettes
+off those two attributes, so there is no flash of the wrong theme on load and no
+new theme framework. Saving also applies the confirmed value in the current tab, so
+the page does not wait for a reload.
+
+**Settings API.** `GET /api/settings` returns the non-sensitive settings the UI
+needs — `{ "theme": "…", "account": { "name", "email", "emailVerified" } }` — and
+`PUT /api/settings` accepts exactly `{ "theme": "system" | "dark" | "light" }`,
+answering `{ "theme": "…" }`. Both require a session; the stored row is keyed by the
+authenticated session, and the API never accepts a user id from the client, so a
+request cannot read or write another account's preference. `PUT` also requires the
+same trusted-origin check as every other write. An unknown field (including
+`userId`), a missing or non-string theme, an invalid theme value, malformed JSON, a
+non-JSON body, and an oversized body are all `400` with the standard
+`{ error: { code, message } }` envelope; unauthenticated is `401`, an untrusted
+origin is `403`. No password hash, session token, API key, provider configuration,
+internal identifier, or other column of `user_preferences` is ever serialized.
+
+**Server layout.** `src/server/settings/` owns the feature: `theme.ts` maps the wire
+values onto the existing enum, `service.ts` reads and writes the preference (and
+resolves the default) through the shared Prisma client, `request.ts` holds the
+strict body parsing, and `view.ts` is the read model the page and the API render.
+No Prisma call is made from a component or a route handler, no new table or column
+was added, and only the `theme` column is written — the model, pet, and UI
+preference columns of the same row keep their values.
+
+**Scope.** The persisted settings are the theme and the pet companion (its selection
+and appearance). Account editing, password or email changes, account deletion,
+billing, and usage tracking do not exist and are not stubbed. Pet *personalities and
+reactions* are not implemented — which companion is selected and which of its
+catalog-defined appearances is chosen are stored (see the next section).
+
+## Pet framework
+
+A small, reusable foundation for interactive 2D companions, kept entirely inside
+`src/features/pets/` (plus a thin server preference service) so chat components never
+hold pet logic. It is deliberately a *framework*: types, catalog, state vocabulary, a
+renderer, lightweight CSS animations, and a persisted per-account selection — no AI
+connection, no finished artwork, no personalities or reactions yet.
+
+- **Architecture.** `types.ts` declares the domain (`id`, `name`, `species`,
+  `description`, `defaultPersonality`, `available`, an abstract `asset` reference, and
+  a list of catalog-defined `appearances`). `catalog.ts` is the single list of pets
+  plus `findPet` / `listAvailablePets` / `resolvePet` (which falls back to an available
+  default instead of throwing) and the appearance helpers `listAppearancesForPet` /
+  `defaultAppearanceForPet` / `findAppearanceForPet` / `isSelectableAppearance` /
+  `resolveAppearanceForPet`.
+  `state.ts` holds the state vocabulary; `animations.ts` holds what each state looks
+  like (two CSS classes plus whether it moves), so behavior, vocabulary, and markup
+  stay in separate files. `components/` has the presentational `PetRenderer`, the
+  inline `shapes.tsx` silhouettes, and the client `PetPlayground`.
+- **Initial catalog.** Three placeholder companions — Yori the cat and Ember the fox
+  are available; Pip the rabbit is kept with `available: false` to prove the
+  availability filter. All are drawn from simple, original inline SVG (no copyright
+  characters, no external or generated assets).
+- **State vocabulary.** `idle`, `happy`, `thinking`, `sleeping`, `sad`, `excited`.
+  Each maps to a distinct pose and, where it has one, a CSS keyframe; `sad` is a
+  still pose so nothing depends on motion.
+- **Appearances.** Each pet declares a small, catalog-defined list of appearances —
+  a stable `id`, a human-readable `name`, an optional short `description`, and a
+  `palette` from a fixed code-owned set (`classic`, `night`, `moss`, `ember`,
+  `frost`). The catalog is the single source of truth: `listAppearancesForPet` lists
+  them, `defaultAppearanceForPet` returns the first (always present, so a pet with no
+  alternate still has a valid default), `isSelectableAppearance` allows an id only for
+  an available pet that lists it, and `resolveAppearanceForPet` maps a missing,
+  unknown, or other-pet id back to that pet's default. Appearances are intentionally
+  small and safe — no arbitrary CSS, no external or user-uploaded assets; the palette
+  only re-tints the existing silhouette through CSS variables. Only the appearance
+  `id` is ever sent by a client or stored.
+- **Renderer.** `<PetRenderer pet appearance state size className label />` renders any
+  catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name (`role="img"`, e.g.
+  "Yori, a cat"), marks the drawing `aria-hidden`, and carries the state as
+  `data-state` and the resolved appearance palette as `data-appearance` — it is not a
+  live region, so mood or appearance changes never announce themselves. A missing or
+  invalid appearance resolves to the pet's default. An unavailable or malformed pet
+  degrades to a labelled placeholder rather than throwing. It is pure presentational
+  React: no timer, effect, network, or storage.
+- **Animations & reduced motion.** Idle breathing, a happy bounce, a thinking
+  head-tilt with thought dots, a sleeping doze with drifting `z` marks, and an
+  excited wiggle with sparkles — all plain CSS keyframes under
+  `@media (prefers-reduced-motion: no-preference)`. With reduced motion the movement
+  stops but every mood is still drawn as a static pose.
+- **Persistent selection.** `src/server/pets/service.ts` reads and writes the
+  existing `user_preferences.selectedPetKey` column (no new table, no migration): it
+  returns the stored, still-available key or the catalog default, and only persists a
+  key the catalog marks available, keyed by the authenticated user. It reuses the
+  shared catalog for validation and never duplicates it. Exposed as a nested member
+  of the settings API — `GET /api/settings/pet` answers `{ "pet": "<key>" }`,
+  `PUT /api/settings/pet` accepts exactly `{ "pet": "<key>" }` — with the same
+  session, trusted-origin, and `{ error: { code, message } }` conventions as the theme
+  endpoint, and the same strict "exactly one known field" parsing. The theme endpoint
+  (`GET/PUT /api/settings`) is unchanged.
+- **Persistent appearance.** The chosen appearance is stored as a single stable key
+  inside the existing `user_preferences.uiPreferences` JSON object (property
+  `petAppearance`) — no new column, table, or migration. `savePetAppearance` validates
+  the id against the user's *currently selected* pet (so an id from another pet, an
+  unknown id, or an unavailable pet is refused), writes only that property, and leaves
+  `selectedPetKey`, `theme`, and any other `uiPreferences` values intact; reads resolve
+  an invalid stored value back to the pet's default. Exposed as a nested member of the
+  pet settings API — `GET /api/settings/pet/appearance` answers
+  `{ "pet": "<key>", "appearance": "<id>" }`, `PUT` accepts exactly
+  `{ "appearance": "<id>" }` — with the same session, trusted-origin, and error
+  conventions. The separate selection route (`GET/PUT /api/settings/pet`) keeps its
+  exact `{ "pet" }` shape.
+- **`/pets` playground.** A public page that shows the available pets, the current
+  selection, and appearance/state/size controls driving the renderer. The appearance
+  control lists only the selected pet's appearances and switches to that pet's default
+  when the pet changes to one that lacks the current appearance. A signed-in visitor is
+  shown their stored companion and appearance, and choosing either saves it
+  optimistically (drawn immediately, confirmed by the server, rolled back with a short
+  note on failure — no spinner); reloading keeps both. An anonymous visitor gets the
+  full playground but the choices stay in the tab and never touch the database. Mood
+  and size remain local demo controls for everyone and are never persisted.
+- **Chat integration.** The empty-state companion beside the welcome mark is the
+  signed-in user's stored pet and appearance (the catalog defaults for anonymous
+  visitors), loaded server-side and passed down as props — the chat stores nothing
+  pet-related itself. It is not connected to messages, replies, streaming, model
+  selection, or sentiment.
+
 ## Architecture
 
 ```text
@@ -441,30 +603,36 @@ src/
 ├── features/
 │   ├── auth/              # Browser auth client, validation, error mapping, forms
 │   ├── chat/              # Explicitly local presentation data
-│   ├── settings/          # Reserved
-│   └── pets/              # Reserved
+│   ├── models/            # Model-selector wire types and browser call
+│   ├── settings/          # Theme vocabulary, browser call, theme attribute, page form
+│   └── pets/              # Pet types, catalog, state, animations, renderer, playground, client
 ├── server/
 │   ├── env.ts             # Lazy, scoped, server-only environment validation
 │   ├── api/               # Shared JSON envelope and request-origin checks
 │   ├── auth/              # Better Auth config, lazy instance, session helpers
 │   ├── conversations/     # Owner-scoped conversation queries and request parsing
 │   ├── messages/          # Owner-scoped message queries, reply generation
+│   ├── pets/              # Pet preference read/write over selectedPetKey, request parsing
+│   ├── settings/          # Theme vocabulary, preference read/write, request parsing
 │   ├── api/               # JSON envelope, origin guard, SSE framing
 │   ├── db/                # Lazy server-only Prisma client boundary
 │   ├── email/             # Server-only SMTP adapter for auth links
 │   └── ai/                # Server-only reply provider boundary
 │       ├── providers/     # OpenRouter adapter: request + stream parsing (no SDK)
 │       ├── key-pool/      # Round-robin key selection, cooldowns, bounded rotation
-│       └── models/        # Reserved; no model records or selection exist
+│       └── models/        # Server-owned catalog, preference service, read model
 └── lib/                   # Reserved for shared, non-secret utilities
 prisma/                    # PostgreSQL schema and initial migration
 tests/                    # Vitest unit tests and Playwright browser checks
 ```
 
 `src/server/auth/`, `src/server/email/`, `src/server/conversations/`,
-`src/server/messages/`, `src/server/ai/` (provider boundary, key pool, and model
-catalog), and `src/features/models/` are implemented; `src/features/settings/` and
-`src/features/pets/` stay empty until their implementation step. Routes remain thin; future domain behavior
+`src/server/messages/`, `src/server/settings/`, `src/server/ai/` (provider boundary,
+key pool, and model catalog), `src/features/models/`, `src/features/settings/`, and
+`src/features/pets/` + `src/server/pets/` (the pet framework, `/pets` playground, and
+persistent per-account pet selection)
+are implemented.
+Routes remain thin; future domain behavior
 belongs in feature modules and server services. Database access and provider
 secrets must remain under server boundaries. No additional backend service, state library, UI kit, or
 provider SDK is needed. Playwright remains a development dependency; the database
@@ -472,16 +640,22 @@ step added the Prisma client and PostgreSQL adapter, and the authentication step
 added exactly two runtime dependencies: `better-auth` and `nodemailer`. The reply
 step added **no dependency at all**: the adapter uses the platform `fetch`.
 
-`src/app/globals.css` provides provisional dark colors, system typography,
+`src/app/globals.css` provides the dark palette — the original design, unchanged —
+plus a light palette behind the theme preference (see
+[Settings and theme preference](#settings-and-theme-preference)), system typography,
 spacing/radius tokens, responsive baseline rules, visible keyboard focus, and
-reduced-motion handling. These support the shell; no proprietary assets or external font requests are used.
+reduced-motion handling. Colors are defined once as CSS custom properties and
+referenced as `rgb(var(--tint) / …)` / `rgb(var(--accent-rgb) / …)`, so every rule in
+the file — including the ones written as literal colors earlier — follows the palette
+named by `data-color-scheme` on `<html>`. These support the shell; no proprietary
+assets or external font requests are used.
 
 ## Verification and tooling limitations
 
-The project passes `npm install`, lint, typecheck, **210 unit tests**, **45 Chromium
+The project passes `npm install`, lint, typecheck, **319 unit tests**, **63 Chromium
 browser tests**, and production build/start without real secrets, SMTP credentials,
-or a live database after client generation. **72 database checks** (13 streaming reply
-+ 16 reply + 9 message + 13 conversation + 9 model preference + 9 auth + 3 structure)
+or a live database after client generation. **87 database checks** (13 streaming reply
++ 16 reply + 9 message + 13 conversation + 9 settings + 6 pets + 9 model preference + 9 auth + 3 structure)
 pass against disposable PostgreSQL 17.6,
 including registration, duplicate-email rejection, session creation, expired
 verification tokens, single-use password reset, the conversation ownership matrix
@@ -501,7 +675,16 @@ clients that do not ask for a stream), and the model preference matrix (the seed
 catalog rows, a preference that points at no model refused by the foreign key, an
 anonymous request refused, one account's stored choice untouched by another's
 request, and unknown/retired/identifier/malformed/unexpected-field bodies writing
-nothing). Unit tests also cover the adapter's framing
+nothing), and the settings matrix (a signed-out read/write refused, the documented
+default with no preferences row, the enum column rejecting a value outside it, a row
+created by the model preference keeping the default theme, one account's stored theme
+untouched by another's request, a theme change that updates the existing row and
+leaves its other columns alone, and invalid/malformed/unexpected/user-id/anonymous/
+untrusted-origin bodies writing nothing), and the pets matrix (the catalog default with
+no stored row, a valid available pet written to `selectedPetKey` for that user only,
+unavailable/unknown/unexpected/user-id/malformed/untrusted bodies writing nothing, a
+pet change leaving the theme and model columns of the same row alone, and one account
+unable to write another's stored pet). Unit tests also cover the adapter's framing
 (split frames, split UTF-8, CRLF, keep-alive comments, `[DONE]` and `finish_reason`
 completion, HTTP failures, timeouts, cancellation, network failures, empty streams,
 size caps, early consumer cancellation), the key pool (round-robin order, cooldown and
@@ -515,11 +698,35 @@ values before any request, default resolution from `OPENROUTER_MODEL` with a
 warn-once fallback, the migration's seed rows matching the catalog, the preference
 service's scoping and fallbacks, the strict `PUT` body parsing, the route's status
 codes and wire shape, the selection client's error mapping, and the selector's
-rendered states). The browser suite drives the selector end to end: the catalog it
+rendered states), and the settings system (the wire-vocabulary maps including
+prototype-pollution keys, default resolution with and without a preferences row, the
+service's per-user reads and upserts, the strict request parsing and its status
+mapping, both route handlers' auth, origin, and body validation, the browser call's
+payload and error mapping, the theme resolver and the inline bootstrap script's
+resolution of `system`, the root layout's rendered attributes, and the settings
+page's rendered sections), and the pet system (unique catalog ids and required
+metadata, the availability filter, safe lookups and fallbacks, the state vocabulary
+and its fallback, a distinct treatment per state with at least one still pose, the
+renderer's accessible label, size variants, `data-state`/`data-motion` attributes, and
+labelled placeholder for an unavailable or malformed pet, plus the pet preference
+service's default/invalid/unavailable/per-user resolution, the `/api/settings/pet`
+route's auth, origin, and strict-body handling, and the selection client's payload and
+error mapping). The browser suite drives the selector end to end: the catalog it
 lists, a stored choice surviving a reload and a second conversation, the identifier
 the stub receives for the default and for two other selections (including a streamed
 rotation), two accounts keeping separate choices, and a raw provider identifier
-refused by the API.
+refused by the API. It drives the settings page the same way: the stored theme it
+displays, dark/light/system each painting their palette (system following an emulated
+device change), a choice surviving a reload, navigation, and a second account, the
+signed-out redirect, the API refusing an untrusted origin and every invalid body, the
+chat and model features still working with a stored theme, and the sidebar's settings
+link on desktop and in the mobile dialog. It drives the pet playground the same way:
+the available pets it offers and the unavailable one it hides, selecting a pet
+changing the renderer, switching state and size changing the renderer, keyboard
+operation of the controls, reduced motion removing the movement while the pose
+remains, a signed-in user's choice persisting across a reload, an anonymous choice
+staying local and never reaching the database, and the chat empty-state companion
+following the stored pet without breaking a narrow layout.
 No AI check reaches the network: the provider contract is covered by unit tests with a
 mocked `fetch`, the reply service and database suites mock the adapter module, and the
 browser suite talks to a local stub (`tests/e2e/mock-openrouter.mjs`) wired in through
