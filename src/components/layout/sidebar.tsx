@@ -249,6 +249,15 @@ export function Sidebar({
               <strong>{account.name}</strong>
               <small>{account.email}</small>
             </span>
+            <Link
+              className="account-settings"
+              href="/settings"
+              aria-label="Settings"
+              title="Settings"
+              onClick={onClose}
+            >
+              <Icon name="settings" />
+            </Link>
           </div>
         ) : (
           <Link className="account-control account-signin" href="/login" onClick={onClose}>

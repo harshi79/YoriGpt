@@ -52,13 +52,27 @@ Verification stands alone: rows are keyed by identifier, not by user.
   there are **no catalog entries** or API keys in this migration.
 - User status is `ACTIVE` or `SUSPENDED`. This is metadata, **not enforcement**;
   a future authentication/authorization layer must explicitly enforce it.
-- A user need not have preferences yet. Theme is `SYSTEM`, `DARK`, or `LIGHT`.
-  Missing preferences should use UI defaults when settings are implemented.
-- `selectedPetKey` is a nullable, stable key for a future pet catalog. There is no
-  catalog to reference yet, so no pet table or fabricated species data is added.
-  Future pet/accessibility options can use the non-sensitive `uiPreferences`
-  object. Future writers must validate allowed keys, payload size, and versions;
-  never store tokens, credentials, or behavioral state here.
+- A user need not have preferences yet. Theme is `SYSTEM`, `DARK`, or `LIGHT`
+  (`ThemePreference`), defaulting to `SYSTEM` in both the schema and the migration.
+  A missing row now resolves to the schema default, so `src/server/settings/` answers
+  `system` for an account that has no `user_preferences` row and for one whose row was
+  created by another feature; see the README's settings section.
+- `selectedPetKey` is a nullable, stable key into the code pet catalog
+  (`src/features/pets/catalog.ts`: placeholder cats, a fox, and a rabbit drawn from
+  inline SVG). It is now wired: `src/server/pets/service.ts` reads and writes it via
+  `GET/PUT /api/settings/pet`, storing only a key the catalog marks available and
+  resolving missing/unknown/retired values to the catalog default. No pet table or
+  fabricated species data is added, and no migration exists or is needed. The pet
+  *appearance* and *personality* are stored alongside it as single stable keys
+  (`petAppearance`, `petPersonality`) inside the same existing non-sensitive
+  `uiPreferences` JSON object — again no new column, table, or migration — each
+  validated against the user's currently selected pet and resolved back to that pet's
+  default when missing, unknown, or from another pet. Only these three keys are stored;
+  pet mood and size are not. A personality is persisted as its catalog key only — never
+  the personality object, its traits, or anything resembling a prompt. Future
+  pet/accessibility options can use the non-sensitive `uiPreferences` object. Future
+  writers must validate allowed keys, payload size, and versions; never store tokens,
+  credentials, or behavioral state here.
 
 ## Integrity, indexing and deletion
 
@@ -265,6 +279,30 @@ server configuration only.
   in this sandbox), and the database suite confirms the rows exist, that a preference
   pointing at no model is refused by the constraint, and that one account's stored
   choice is untouched by another account's request.
+- **The settings step added no schema change either.** The theme preference reuses
+  `user_preferences.theme` and its existing `ThemePreference` enum exactly as the
+  initial migration created them: `src/server/settings/service.ts` upserts only that
+  column, keyed by the authenticated user, and reads it back through the shared
+  Prisma client. No table, column, enum value, index, or migration was added, and no
+  secret or internal identifier is serialized. The database suite checks it against
+  real sessions: the documented `SYSTEM` default with no row, the enum column
+  rejecting a value outside it, one account's theme untouched by another account's
+  request, a theme change updating the existing row without disturbing its
+  `preferredModelId`, and invalid or unauthorized bodies writing nothing.
+- **The pet framework and its persistence added no schema change at all.** The render
+  layer (catalog, renderer, state, appearances, personalities) lives in
+  `src/features/pets/`, and the persisted selection reuses the existing
+  `user_preferences.selectedPetKey` column exactly as the initial migration created it,
+  while the appearance and personality reuse the existing non-sensitive `uiPreferences`
+  JSON object (properties `petAppearance` and `petPersonality`):
+  `src/server/pets/service.ts` upserts only those fields, keyed by the authenticated
+  user, and reads them back through the shared Prisma client. No table, column, index,
+  or migration was added. The database suite checks it against real sessions: the
+  catalog default with no row, a valid available pet written for that user only,
+  unavailable/unknown/unexpected/untrusted bodies writing nothing, a pet change leaving
+  the row's theme/model columns alone, one account unable to write another's stored
+  pet, and the appearance and personality each stored as a single validated key that
+  leaves the selection, the other key, and every other preference intact.
 - **OpenRouter key rotation added no schema change either.** Which of the configured
   keys signs a request, and which keys are cooling down after the provider rejected
   them, live in the server process's memory (`src/server/ai/key-pool/`). There is no

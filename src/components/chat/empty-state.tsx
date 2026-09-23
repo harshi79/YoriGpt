@@ -1,3 +1,6 @@
+import { PetRenderer } from "../../features/pets/components/pet-renderer";
+import { DEFAULT_PET_ID, resolvePet } from "../../features/pets/catalog";
+import { INITIAL_PET_STATE } from "../../features/pets/state";
 import { Icon, YoriMark, type IconName } from "../ui/icon";
 
 const suggestions: {
@@ -39,14 +42,41 @@ const suggestions: {
 
 export function EmptyState({
   onChoosePrompt,
+  companionPetKey,
+  companionAppearanceKey,
+  companionPersonalityKey,
 }: {
   onChoosePrompt: (draft: string) => void;
+  /** The signed-in user's stored companion; the catalog default otherwise. */
+  companionPetKey?: string;
+  /** The stored appearance for that pet; its default when absent or unknown. */
+  companionAppearanceKey?: string;
+  /** The stored personality for that pet; its default when absent or unknown. */
+  companionPersonalityKey?: string;
 }) {
+  const pet = resolvePet(companionPetKey ?? DEFAULT_PET_ID);
   return (
     <section className="empty-state" aria-labelledby="welcome-heading">
-      <div className="welcome-symbol">
-        <YoriMark />
-        <span className="symbol-spark" />
+      <div className="welcome-figure">
+        <div className="welcome-symbol">
+          <YoriMark />
+          <span className="symbol-spark" />
+        </div>
+        {/* The pet framework's only appearance in the chat: a static companion, idle
+            and small, beside the mark. It shows the signed-in user's stored pet,
+            appearance, and personality (the defaults for everyone else), holds no
+            state of its own, knows nothing about the conversation, and is not
+            connected to replies or streaming. The personality rides along as data the
+            renderer exposes; it changes no message and reaches no AI call. The
+            renderer owns the single accessible label. */}
+        <PetRenderer
+          className="welcome-pet"
+          pet={pet}
+          appearance={companionAppearanceKey}
+          personality={companionPersonalityKey}
+          state={INITIAL_PET_STATE}
+          size="sm"
+        />
       </div>
       <p className="eyebrow">A fresh conversation. A new possibility.</p>
       <h1 id="welcome-heading">

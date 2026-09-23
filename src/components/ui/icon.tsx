@@ -21,6 +21,7 @@ const paths = {
   user: "M5 21v-2a7 7 0 0 1 14 0v2M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0",
   trash: "M5 7h14M10 7V5h4v2M6 7l1 13h10l1-13M10 11v6M14 11v6",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  settings: "M4 8h8m4 0h4M4 16h4m4 0h8M14 6v4M10 14v4",
 } as const;
 
 export type IconName = keyof typeof paths;
