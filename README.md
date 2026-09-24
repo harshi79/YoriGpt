@@ -337,6 +337,27 @@ Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
   a "latest message unchanged" check means a second concurrent request is refused
   (`400`) rather than storing a duplicate reply, and the
   `(conversationId, position)` unique constraint stays intact.
+- `src/server/ai/pet-context.ts` is the **companion context contract**: the only
+  information about the user's pet that the AI layer may hold. It is a projection, not
+  a passthrough — a catalog pet `id` and `name`, plus a personality `id`, `name`, the
+  closed trait vocabulary, and the two optional behavior hints. Deliberately absent:
+  the appearance and its palette, the `asset`, `species`, and every catalog
+  `description`; raw catalog objects; the `user_preferences` row and `uiPreferences`;
+  any account field (user id, email, session, conversation); and any credential,
+  environment value, or provider identifier. `resolveAiPetContext(user)` takes the
+  session user and nothing else — there is no parameter a request could smuggle a pet
+  or personality through, and the reply endpoint already refuses every body field — and
+  resolves both values through the existing pet preference service and catalog, so
+  there is no second source of truth. A missing, unknown, retired, unavailable,
+  malformed, or *incompatible* selection (a personality some other pet offers) degrades
+  to the documented defaults, and the personality returned always belongs to the pet it
+  is returned with. It reads only the caller's own row, writes nothing — a stale pair is
+  resolved, never repaired in passing — and never throws: a companion is context, not a
+  requirement, so a failed preference read degrades to the catalog default instead of
+  failing a reply. `prepareReply` resolves it beside the history and the model key and
+  carries it on the prepared reply for both paths. **No prompt, turn, or provider
+  request is built from it yet**: the adapter still receives turns and a catalog model
+  key, and stays unaware of pets, preferences, and the database.
 
 The SSE protocol is small and documented in `src/features/conversations/types.ts`:
 
@@ -698,11 +719,24 @@ lifecycle — no AI connection and no finished artwork.
   signed-in user's stored pet, appearance, and personality (the catalog defaults for
   anonymous visitors), loaded server-side and passed down as props — the chat stores
   nothing pet-related itself. The personality is carried as data only: it alters no
-  message, is never sent to OpenRouter, and is never turned into a system prompt. While
-  a conversation is open the same companion also appears in the header and reacts to the
-  real reply lifecycle; that route loads the same three stored keys, so the header pet
-  and the empty-state pet cannot disagree. It is still connected to no model selection,
-  sentiment, or provider detail, and its runtime state is never stored.
+  message, is never turned into a system prompt, and reaches no provider request — the
+  narrowed companion context that reply preparation resolves stops at the server's own
+  orchestration layer (see below). While a conversation is open the same companion also
+  appears in the header and reacts to the real reply lifecycle; that route loads the
+  same three stored keys, so the header pet and the empty-state pet cannot disagree. It
+  is still connected to no model selection, sentiment, or provider detail, and its
+  runtime state is never stored.
+- **AI context contract.** `src/server/ai/pet-context.ts` narrows the stored companion
+  to the only fields the AI layer may hold: pet `id` and `name`, personality `id`,
+  `name`, `traits`, and the two optional `hints`. It is resolved **server-side** from
+  the authenticated account's own preferences through the same service and catalog the
+  pages use, always as a compatible pet/personality pair, and it degrades to the
+  catalog defaults for a missing, unavailable, or stale selection. No appearance,
+  palette, description, preference row, account field, or credential is part of it, and
+  nothing a browser sent is read — the reply endpoint refuses every body field, and the
+  resolver has one parameter: the session user. This is preparation only: the reaction
+  engine above is unchanged, no prompt or dialogue is built from the context yet, and
+  the provider request is byte-for-byte what it was.
 
 ## Architecture
 
@@ -733,7 +767,8 @@ src/
 │   └── ai/                # Server-only reply provider boundary
 │       ├── providers/     # OpenRouter adapter: request + stream parsing (no SDK)
 │       ├── key-pool/      # Round-robin key selection, cooldowns, bounded rotation
-│       └── models/        # Server-owned catalog, preference service, read model
+│       ├── models/        # Server-owned catalog, preference service, read model
+│       └── pet-context.ts # Narrowed companion contract the AI layer may hold
 └── lib/                   # Reserved for shared, non-secret utilities
 prisma/                    # PostgreSQL schema and initial migration
 tests/                    # Vitest unit tests and Playwright browser checks
@@ -835,7 +870,20 @@ falling back without throwing, `idle` holding, an error reaction never being pos
 the resolver scheduling no timer and consulting no clock, no randomness, and nothing
 outside its arguments, the chat-phase seam, and the behavior
 controller's dispatch, settle-to-idle, reset, per-pet and per-personality resolution
-with no stale reaction, and a settle timer that cannot fire after unmount), and the
+with no stale reaction, and a settle timer that cannot fire after unmount), the AI
+companion-context contract (the exact fields it narrows two catalog definitions to and
+the ones it refuses — appearance, palette, species, descriptions, preference rows,
+account fields, credentials — plus a guard that rejects every wider shape, server-side
+resolution of a stored, missing, unavailable, malformed, and cross-pet selection, the
+invariant that the personality always belongs to the pet it is returned with across
+every stored combination the catalog can produce, one account's companion never
+appearing in another's, an anonymous caller resolving to the catalog default with no
+row read at all, a smuggled pet, personality, or credential changing nothing, no write
+while building context, and a failed preference read degrading instead of throwing),
+the reply flow resolving that context beside the history and model key while the
+serialized provider body still carries only a model, turns, and the stream flag, the
+reply endpoint still refusing a body that claims a pet or personality, and the provider
+adapter's own source importing nothing pet- or database-related), and the
 chat integration (each lifecycle moment producing its documented event, a reporter
 reusing the existing phase mapping and emitting nothing outside the vocabulary, the
 first-content event reported once for many deltas, a completed, failed, or cancelled

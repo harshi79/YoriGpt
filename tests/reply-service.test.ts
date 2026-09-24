@@ -73,6 +73,30 @@ const models = vi.hoisted(() => ({ state: { key: "gpt-4o-mini" } }));
 vi.mock("../src/server/ai/models/service", () => ({
   resolveReplyModelKey: async () => models.state.key,
 }));
+// The companion context comes from its own resolver, which is covered against a fake
+// preference table in tests/ai-pet-context.test.ts. Here it is chosen directly, so the
+// reply tests assert what preparation does with it and never re-test resolution.
+const companion = vi.hoisted(() => ({
+  state: {
+    context: {
+      pet: { id: "yori-cat", name: "Yori" },
+      personality: {
+        id: "calm",
+        name: "Calm",
+        traits: ["gentle", "independent"],
+        hints: { restingState: "idle", motionLevel: "low" },
+      },
+    },
+    // Every user the resolver was asked about, in order.
+    resolvedFor: [] as unknown[],
+  },
+}));
+vi.mock("../src/server/ai/pet-context", () => ({
+  resolveAiPetContext: async (user: unknown) => {
+    companion.state.resolvedFor.push(user);
+    return companion.state.context;
+  },
+}));
 vi.mock("../src/server/ai/providers/openrouter", () => ({
   openRouterProvider: { name: "openrouter", generateReply: vi.fn(), streamReply: vi.fn() },
   generateReply: vi.fn(),
@@ -117,6 +141,7 @@ function message(overrides: Partial<Row> & { position: number }): Row {
 beforeEach(() => {
   vi.clearAllMocks();
   models.state.key = "gpt-4o-mini";
+  companion.state.resolvedFor = [];
   fake.state.conversation = {
     id: conversationId,
     title: "New chat",
@@ -359,6 +384,83 @@ describe("model selection for a reply", () => {
     await generateAssistantReply(userId, conversationId);
     expect(generateAssistantReply.length).toBe(2);
     expect(generateReply).toHaveBeenCalledWith(expect.anything(), { model: "gpt-4o" });
+  });
+});
+
+describe("companion context for a reply", () => {
+  it("resolves the caller's companion and exposes it on the prepared reply", async () => {
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+
+    const prepared = await prepareReply(userId, conversationId);
+
+    // One typed value on the prepared reply, resolved from the session user alone.
+    expect(prepared).toMatchObject({ ok: true, petContext: companion.state.context });
+    expect(companion.state.resolvedFor).toEqual([{ id: userId }]);
+  });
+
+  it("carries the same context through both reply paths", async () => {
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    generateReply.mockResolvedValue("Stored answer");
+
+    await generateAssistantReply(userId, conversationId);
+
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Again" })];
+    streamReply.mockImplementation(async function* () {
+      yield { type: "delta", text: "Streamed" };
+    });
+    const prepared = await prepareReply(userId, conversationId);
+    if (!prepared.ok) throw new Error("expected a prepared reply");
+    for await (const event of streamAssistantReply(userId, prepared)) void event;
+
+    // Each preparation resolves it once, for the same session user.
+    expect(companion.state.resolvedFor).toEqual([{ id: userId }, { id: userId }]);
+  });
+
+  it("leaves the generated request exactly as it was: turns and a catalog model key", async () => {
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    generateReply.mockResolvedValue("Stored answer");
+
+    await generateAssistantReply(userId, conversationId);
+
+    // The context is available to the orchestration layer and stops there: the adapter
+    // is called with the same two arguments as before, so no companion field can reach
+    // a provider request until a later task decides to send one.
+    expect(generateReply).toHaveBeenCalledWith([{ role: "user", content: "Hello" }], {
+      model: "gpt-4o-mini",
+    });
+    expect(Object.keys(generateReply.mock.calls[0][1] ?? {})).toEqual(["model"]);
+  });
+
+  it("leaves the streamed request exactly as it was too", async () => {
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    streamReply.mockImplementation(async function* () {
+      yield { type: "delta", text: "Streamed" };
+    });
+
+    const prepared = await prepareReply(userId, conversationId);
+    if (!prepared.ok) throw new Error("expected a prepared reply");
+    for await (const event of streamAssistantReply(userId, prepared)) void event;
+
+    expect(streamReply).toHaveBeenCalledWith([{ role: "user", content: "Hello" }], {
+      model: "gpt-4o-mini",
+    });
+    expect(Object.keys(streamReply.mock.calls[0][1] ?? {})).toEqual(["model"]);
+  });
+
+  it("takes the companion from the session, never from a caller-supplied field", async () => {
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    generateReply.mockResolvedValue("Stored answer");
+
+    // Neither public signature has a parameter a pet or personality could arrive
+    // through, and preparation hands the resolver the session user's id and nothing else.
+    expect(prepareReply.length).toBe(2);
+    expect(generateAssistantReply.length).toBe(2);
+    await generateAssistantReply(userId, conversationId);
+    expect(companion.state.resolvedFor).toEqual([{ id: userId }]);
   });
 });
 

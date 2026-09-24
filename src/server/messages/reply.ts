@@ -2,6 +2,7 @@ import "server-only";
 import { AiNotConfiguredError, AiProviderError } from "../ai/errors";
 import { openRouterProvider } from "../ai/providers/openrouter";
 import { resolveReplyModelKey } from "../ai/models/service";
+import { resolveAiPetContext, type AiPetContext } from "../ai/pet-context";
 import type { ChatTurn } from "../ai/types";
 import { createAssistantMessage, listMessages } from "./service";
 import type { MessageRole, MessageSummary } from "@/features/conversations/types";
@@ -17,6 +18,14 @@ import type { MessageRole, MessageSummary } from "@/features/conversations/types
  * streaming path forwards provider deltas as they come and stores the text once
  * the provider is finished; the non-streaming path waits for the whole answer.
  * Nothing about ownership, history, limits, or persistence is duplicated.
+ *
+ * Preparation also resolves the caller's **companion context** (`AiPetContext`) —
+ * the safe, catalog-resolved projection of their stored pet and personality. It is
+ * carried on the prepared reply so the AI orchestration layer has it in one typed
+ * value, and it stops there: no turn, prompt, or provider request is built from it
+ * yet, and the provider adapter still receives only turns and a catalog model key.
+ * Like the model key, it is resolved from the session user alone — never from
+ * anything the request carried.
  */
 
 /** Newest messages considered as context; no summarization or memory yet. */
@@ -79,24 +88,41 @@ export type PreparedReply = {
    * browser sent; the adapter resolves it to the OpenRouter identifier.
    */
   modelKey: string;
+  /**
+   * The caller's companion, resolved server-side from their own stored preferences
+   * and narrowed to the AI contract in `../ai/pet-context`: a catalog pet id and
+   * name, plus a personality id, name, traits, and hints that always belongs to
+   * that pet. Missing, stale, unavailable, or incompatible selections degrade to
+   * the documented catalog defaults, so this is always a usable value and never a
+   * reason for a reply to fail.
+   *
+   * It carries no user id, no appearance, no stored preference row, and no
+   * credential. Nothing consumes it yet: it is available to the orchestration
+   * layer, and the provider request is unchanged.
+   */
+  petContext: AiPetContext;
 };
 
 export type ReplyPreparation = PreparedReply | { ok: false; reason: ReplyFailureReason };
 
 /**
  * The first half of both reply paths: resolve the owned conversation, find the
- * newest turn, and build the provider history. Everything here happens before a
- * stream starts, so an unknown or foreign conversation, an empty conversation,
- * and a turn that already has a reply are answered with an ordinary JSON error.
+ * newest turn, build the provider history, and resolve the caller's own
+ * preferences — the model to generate with and the companion context. Everything
+ * here happens before a stream starts, so an unknown or foreign conversation, an
+ * empty conversation, and a turn that already has a reply are answered with an
+ * ordinary JSON error.
  */
 export async function prepareReply(
   userId: string,
   conversationId: string,
 ): Promise<ReplyPreparation> {
-  // The history and the user's model preference are independent reads.
-  const [page, modelKey] = await Promise.all([
+  // Three independent reads, each keyed by the session user and none of them by
+  // anything the request carried.
+  const [page, modelKey, petContext] = await Promise.all([
     listMessages(userId, conversationId),
     resolveReplyModelKey(userId),
+    resolveAiPetContext({ id: userId }),
   ]);
   if (!page) return { ok: false, reason: "not-found" };
 
@@ -112,6 +138,7 @@ export async function prepareReply(
     answeredMessageId: latest.id,
     turns: buildProviderTurns(page.messages),
     modelKey,
+    petContext,
   };
 }
 

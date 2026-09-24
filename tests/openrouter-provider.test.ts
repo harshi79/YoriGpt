@@ -108,6 +108,22 @@ describe("OpenRouter request construction", () => {
     ]);
     expect(JSON.stringify(body)).not.toContain("position");
     expect(JSON.stringify(body)).not.toContain("createdAt");
+    // Nothing about a companion travels either. The pet context is resolved by the reply
+    // orchestration and stops there, so the request a provider receives is exactly the
+    // one it received before that contract existed: a model, the turns, and the flag.
+    const sent = JSON.stringify(body);
+    expect(Object.keys(body).sort()).toEqual(["messages", "model", "stream"]);
+    for (const forbidden of [
+      "pet",
+      "personality",
+      "companion",
+      "traits",
+      "restingState",
+      "motionLevel",
+      "uiPreferences",
+      "selectedPetKey",
+    ])
+      expect(sent, forbidden).not.toContain(forbidden);
   });
 
   it("honours a configured base URL", async () => {
