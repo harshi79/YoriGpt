@@ -420,9 +420,10 @@ test("a retried reply gives the companion a clean reaction lifecycle", async ({ 
   await openNewConversation(page);
   const companion = page.locator(".chat-companion");
 
-  // The stub streams two deltas and then drops the connection, once per text: the
-  // failure is real, and the retry that follows it succeeds.
-  await send(page, "[streamfail] cut this off");
+  // The stub streams two deltas and then drops the connection once per distinct
+  // text. Use a test-specific turn: an earlier streaming test also triggers its
+  // one-time failure, and reusing that text would make this attempt succeed.
+  await send(page, "[streamfail] verify the pet retry lifecycle");
 
   await expect(replyNotice(page)).toHaveClass(/is-error/);
   await expect(companion).toHaveAttribute("data-state", "sad");
@@ -454,8 +455,10 @@ test("leaving a conversation mid-generation settles the companion", async ({ pag
   // Opening another conversation aborts that generation. The companion settles
   // instead of thinking forever about a reply that will never arrive here.
   await page.getByRole("button", { name: "New chat", exact: true }).click();
+  // The current URL already matches /chat/:id. Wait for the *different* route,
+  // rather than accepting that old URL before the async creation navigates.
+  await expect.poll(() => new URL(page.url()).pathname).not.toBe(`/chat/${first}`);
   await expect(page).toHaveURL(/\/chat\/[A-Za-z0-9_-]+$/);
-  expect(await conversationIdFromUrl(page)).not.toBe(first);
   await expect(companion).toHaveCount(1);
   await expect(companion).toHaveAttribute("data-state", "idle");
 
