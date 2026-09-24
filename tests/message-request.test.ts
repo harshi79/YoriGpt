@@ -112,7 +112,21 @@ describe("reply request parsing", () => {
   });
 
   it("refuses every field, including an attempted role, owner, or content", async () => {
-    for (const field of ["content", "role", "userId", "position", "model", "prompt", "temperature"]) {
+    // `pet` and `personality` are in the list because the reply flow resolves a
+    // companion context server-side: a body field claiming one is refused here, so the
+    // only companion a reply can carry is the account's own stored selection.
+    for (const field of [
+      "content",
+      "role",
+      "userId",
+      "position",
+      "model",
+      "prompt",
+      "temperature",
+      "pet",
+      "personality",
+      "petPersonality",
+    ]) {
       const parsed = await parseReplyRequest(json({ [field]: "x" }));
       expect(parsed, field).toEqual({ ok: false, message: `Unsupported field: ${field}.` });
     }

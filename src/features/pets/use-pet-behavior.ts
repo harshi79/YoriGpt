@@ -18,7 +18,9 @@ import { INITIAL_PET_STATE, type PetState } from "./state";
  * and personality that produced it, and anything recorded for a different
  * configuration simply reads as `idle`. So changing pet or personality needs no effect,
  * no extra render pass, and cannot leave the previous companion's mood — or a stale
- * personality rule — behind.
+ * personality rule — behind. The same rule covers the "current state" the mapping is
+ * given: it is read from that record rather than from a separate mirror, so a state
+ * left behind by one selection can neither be seen nor inherited by the next.
  *
  * Client-side only. No network, no database, no OpenRouter: nothing here is persisted.
  */
@@ -37,6 +39,20 @@ const NO_REACTION: BehaviorRecord = {
   state: INITIAL_PET_STATE,
   lastEvent: null,
 };
+
+/**
+ * The state a record really means for one configuration: its own while it belongs to
+ * that pet and personality, and `idle` otherwise. A reaction recorded for a previous
+ * selection is therefore invisible to the next one — it can neither be seen nor
+ * inherited, which is what keeps a dozing record left by a sleepy personality from
+ * putting a calm pet to sleep on the next `cancelled`. The render below derives the
+ * visible state with the same comparison.
+ */
+function stateOf(record: BehaviorRecord, petId: string, personalityId: string): PetState {
+  return record.petId === petId && record.personalityId === personalityId
+    ? record.state
+    : INITIAL_PET_STATE;
+}
 
 export type PetBehavior = {
   /** The resolved state to hand straight to `<PetRenderer state={…} />`. */
@@ -64,13 +80,16 @@ export function usePetBehavior(options: UsePetBehaviorOptions = {}): PetBehavior
   const personality = resolvePersonalityForPet(pet.id, options.personality);
 
   const [record, setRecord] = useState<BehaviorRecord>(NO_REACTION);
+  // The same record, readable from a callback that runs after the render which wrote
+  // it (a dispatch from an event handler, a settle from the timer). Rendered state
+  // alone cannot serve the mapping's "current state" input, and a second mirror of it
+  // would be a second place for a stale value to hide.
+  const recordRef = useRef<BehaviorRecord>(NO_REACTION);
 
   // One timer for the whole controller, plus a guard so a settle firing after unmount
   // can never update a component that is gone.
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(true);
-  // A mirror of the resolved state, for the mapping's "current state" input.
-  const stateRef = useRef<PetState>(INITIAL_PET_STATE);
 
   const clearTimer = useCallback(() => {
     if (timer.current !== null) {
@@ -79,8 +98,17 @@ export function usePetBehavior(options: UsePetBehaviorOptions = {}): PetBehavior
     }
   }, []);
 
+  /** Writes the record once, to both the ref and the state, so they cannot disagree. */
+  const write = useCallback((next: BehaviorRecord) => {
+    recordRef.current = next;
+    setRecord(next);
+  }, []);
+
   // Cleanup on unmount: cancel the pending settle and stop accepting further ones.
-  // No state is written here, so nothing can land after the component is gone.
+  // No state is written here, so nothing can land after the component is gone — and
+  // because `alive` is what the setters below check, a reporter from a chat generation
+  // that outlives the shell can neither write state nor schedule a timer nobody would
+  // ever clear.
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -101,18 +129,18 @@ export function usePetBehavior(options: UsePetBehaviorOptions = {}): PetBehavior
 
   const dispatch = useCallback(
     (event: PetReactionEvent) => {
+      if (!alive.current) return;
       const reaction = resolveReaction({
         pet: pet.id,
         personality: personality.id,
         event,
-        currentState: stateRef.current,
+        currentState: stateOf(recordRef.current, pet.id, personality.id),
       });
 
       // A reaction replaces whatever was pending: the newest event wins, and no two
       // settle timers are ever outstanding at once.
       clearTimer();
-      stateRef.current = reaction.state;
-      setRecord({
+      write({
         petId: pet.id,
         personalityId: personality.id,
         state: reaction.state,
@@ -123,30 +151,29 @@ export function usePetBehavior(options: UsePetBehaviorOptions = {}): PetBehavior
         timer.current = setTimeout(() => {
           timer.current = null;
           if (!alive.current) return;
-          stateRef.current = INITIAL_PET_STATE;
           // Keeping the recorded ids means a settle that arrives after a configuration
           // change still resolves to idle rather than resurrecting the old pet's mood.
-          setRecord((current) => ({ ...current, state: INITIAL_PET_STATE }));
+          write({ ...recordRef.current, state: INITIAL_PET_STATE });
         }, reaction.durationMs);
       }
     },
-    [pet.id, personality.id, clearTimer],
+    [pet.id, personality.id, clearTimer, write],
   );
 
   const holdState = useCallback(
     (next: PetState) => {
+      if (!alive.current) return;
       clearTimer();
-      stateRef.current = next;
-      setRecord({ petId: pet.id, personalityId: personality.id, state: next, lastEvent: null });
+      write({ petId: pet.id, personalityId: personality.id, state: next, lastEvent: null });
     },
-    [pet.id, personality.id, clearTimer],
+    [pet.id, personality.id, clearTimer, write],
   );
 
   const reset = useCallback(() => {
+    if (!alive.current) return;
     clearTimer();
-    stateRef.current = INITIAL_PET_STATE;
-    setRecord((current) => ({ ...current, state: INITIAL_PET_STATE, lastEvent: null }));
-  }, [clearTimer]);
+    write({ ...recordRef.current, state: INITIAL_PET_STATE, lastEvent: null });
+  }, [clearTimer, write]);
 
   return { state, lastEvent, dispatch, holdState, reset };
 }

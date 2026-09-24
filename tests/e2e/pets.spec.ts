@@ -447,6 +447,55 @@ test("different personalities react differently to the same event", async ({ pag
   await expect(renderer(page)).toHaveAttribute("data-state", "excited");
 });
 
+test("the reaction demo compares one event across every personality", async ({ page }) => {
+  await page.goto("/pets");
+  const demo = page.getByRole("group", { name: "Reaction demo" });
+  const compare = demo.locator(".pets-reaction-compare");
+
+  // There is nothing to compare until an event has actually been dispatched.
+  await expect(compare).toHaveCount(0);
+
+  await demo.getByRole("button", { name: "Response Complete" }).click();
+
+  // The same event, resolved for every personality the cat offers, as plain text:
+  // each one labelled with the state it produces, so the differences can be read
+  // without switching back and forth.
+  await expect(compare).toBeVisible();
+  await expect(compare.locator(".pets-reaction-compare-item")).toHaveCount(3);
+  await expect(compare.locator('[data-personality="calm"]')).toContainText("Happy");
+  await expect(compare.locator('[data-personality="curious"]')).toContainText("Excited");
+  await expect(compare.locator('[data-personality="sleepy"]')).toContainText("Happy");
+
+  // Exactly one is marked as the selected personality, and it is the one on show.
+  await expect(compare.locator('[aria-current="true"]')).toHaveCount(1);
+  await expect(compare.locator('[aria-current="true"]')).toHaveAttribute(
+    "data-personality",
+    "calm",
+  );
+
+  // Read-only and unannounced: comparing changes nothing and is never a live region.
+  await expect(renderer(page)).toHaveAttribute("data-state", "happy");
+  await expect(compare).not.toHaveAttribute("aria-live");
+  await expect(compare).not.toHaveAttribute("role");
+
+  // The line describes the event, so it stays readable after the pet settles.
+  await expect(renderer(page)).toHaveAttribute("data-state", "idle", { timeout: 5_000 });
+  await expect(compare).toBeVisible();
+  await expect(compare).toHaveAttribute("data-event", "response-completed");
+
+  // Picking another personality re-reads the same comparison for the new selection.
+  await page
+    .getByRole("group", { name: "Choose a personality" })
+    .getByRole("button", { name: "Curious" })
+    .click();
+  await demo.getByRole("button", { name: "Response Complete" }).click();
+  await expect(compare.locator('[aria-current="true"]')).toHaveAttribute(
+    "data-personality",
+    "curious",
+  );
+  await expect(renderer(page)).toHaveAttribute("data-state", "excited");
+});
+
 test("reaction controls work from the keyboard", async ({ page }) => {
   await page.goto("/pets");
   const demo = page.getByRole("group", { name: "Reaction demo" });

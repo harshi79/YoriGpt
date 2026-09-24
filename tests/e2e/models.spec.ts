@@ -20,7 +20,13 @@ test.skip(!databaseUrl, DATABASE_SKIP_REASON);
 test.afterAll(removeTestAccounts);
 
 /** The catalog as the server owns it: display names the selector must offer. */
-const ACTIVE_NAMES = ["GPT-4o mini", "GPT-4o", "Claude 3.5 Haiku", "Claude 3.7 Sonnet"];
+const ACTIVE_NAMES = [
+  "GPT-4o mini",
+  "GPT-4o",
+  "Claude 3.5 Haiku",
+  "Claude 3.7 Sonnet",
+  "Llama 3.3 70B",
+];
 const RETIRED_NAME = "Llama 3.1 70B";
 
 function selector(page: Page) {
@@ -87,14 +93,19 @@ test("the selector lists the server's catalog, and hides retired models", async 
   await expect(selectorOptions(page)).toHaveValue("gpt-4o-mini");
   expect(ACTIVE_NAMES).not.toContain(RETIRED_NAME);
 
-  // The API agrees with the UI, and never exposes an OpenRouter identifier.
+  // The API agrees with the UI, and never exposes a provider identifier.
   const response = await page.context().request.get("/api/models");
   expect(response.status()).toBe(200);
-  const body = (await response.json()) as { models: unknown[]; selectedModelKey: string };
+  const body = (await response.json()) as {
+    models: { key: string; name: string }[];
+    selectedModelKey: string;
+  };
   expect(body.selectedModelKey).toBe("gpt-4o-mini");
-  expect(JSON.stringify(body)).not.toContain("openai/");
-  expect(JSON.stringify(body)).not.toContain("anthropic/");
-  expect(JSON.stringify(body)).not.toContain("llama");
+  expect(body.models.map((model) => model.name)).toEqual(ACTIVE_NAMES);
+  expect(body.models.map((model) => model.key)).toContain("nvidia-llama-3.3-70b");
+  expect(body.models.map((model) => model.key)).not.toContain("llama-3.1-70b");
+  // Only catalog keys cross this boundary, never provider identifiers.
+  expect(JSON.stringify(body)).not.toMatch(/openai\/|anthropic\/|meta\//);
 });
 
 test("a signed-out choice sends the visitor to sign in and stores nothing", async ({ page }) => {

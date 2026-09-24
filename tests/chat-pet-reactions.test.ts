@@ -163,3 +163,90 @@ describe("one generation, one sequence", () => {
     expect(dispatched.filter((event) => event === "response-completed")).toHaveLength(2);
   });
 });
+
+describe("a generation that is no longer the current one", () => {
+  it("reports nothing at all once a newer generation superseded it", () => {
+    const stale = createChatPetReactions(dispatch);
+    stale.generationStarted();
+    stale.firstContent();
+
+    // The shell replaced the stream: the newer generation owns the companion now, and
+    // it announces itself, so the one going away says nothing on its way out.
+    stale.superseded();
+    expect(dispatched).toEqual(["thinking", "response-started"]);
+
+    // Every late callback from the replaced generation is ignored, including the
+    // first-content report a delta already in flight would otherwise make.
+    stale.firstContent();
+    stale.completed();
+    stale.failed();
+    stale.cancelled();
+    stale.messageSent();
+    stale.generationStarted();
+
+    expect(dispatched).toEqual(["thinking", "response-started"]);
+  });
+
+  it("superseding is silent, so a replacement is not announced as a cancellation", () => {
+    const stale = createChatPetReactions(dispatch);
+    stale.generationStarted();
+    stale.superseded();
+
+    expect(dispatched).toEqual(["thinking"]);
+    expect(dispatched).not.toContain("cancelled");
+  });
+
+  it("can be superseded before it ever reported anything", () => {
+    const never = createChatPetReactions(dispatch);
+    never.superseded();
+
+    never.messageSent();
+    never.generationStarted();
+    never.firstContent();
+    never.completed();
+
+    expect(dispatched).toEqual([]);
+  });
+
+  it("supersedes an ended generation without repeating or changing its outcome", () => {
+    const done = createChatPetReactions(dispatch);
+    done.generationStarted();
+    done.completed();
+    done.superseded();
+
+    expect(dispatched).toEqual(["thinking", "response-completed"]);
+  });
+
+  it("leaves the generation that takes over a full sequence of its own", () => {
+    const first = createChatPetReactions(dispatch);
+    first.generationStarted();
+    first.firstContent();
+    first.superseded();
+
+    const replacement = createChatPetReactions(dispatch);
+    replacement.generationStarted();
+    replacement.firstContent();
+    replacement.completed();
+
+    expect(dispatched).toEqual([
+      "thinking",
+      "response-started",
+      "thinking",
+      "response-started",
+      "response-completed",
+    ]);
+  });
+
+  it("still settles a generation abandoned with nothing replacing it", () => {
+    const abandoned = createChatPetReactions(dispatch);
+    abandoned.generationStarted();
+
+    // Navigation ends a generation with no successor, which is a cancellation rather
+    // than a silent replacement: the companion has to stop waiting for that answer.
+    abandoned.cancelled();
+    abandoned.completed();
+    abandoned.superseded();
+
+    expect(dispatched).toEqual(["thinking", "cancelled"]);
+  });
+});

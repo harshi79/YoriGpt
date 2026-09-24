@@ -2,10 +2,11 @@
 
 ## Scope and version decision
 
-This step adds schema, migration SQL, generated-client configuration and the
-server database boundary only. No authentication library, accounts/sessions,
-passwords, credentials, API handlers, application queries, seeds, or UI/database
-connection have been added.
+The initial data-foundation step added the schema, migration SQL, client
+configuration, and server database boundary. Subsequent tasks added Better Auth,
+conversation/message services, catalog seed migrations, settings, pets, and
+provider-backed replies. The original foundation migration contains no application
+seed rows; the two later seed migrations populate `ai_models`.
 
 Prisma CLI, `@prisma/client`, and `@prisma/adapter-pg` are pinned together at
 **6.19.3**, the latest available 6.x patch at inspection. Node 22.22.3 is compatible.
@@ -217,17 +218,19 @@ The committed migrations are
 Prisma's empty-to-schema diff and augmented with `citext`, the two CHECK constraints,
 and a transaction — it contains **no application INSERTs**),
 `prisma/migrations/20260923010000_add_better_auth/migration.sql` (Better Auth tables),
-and `prisma/migrations/20260923020000_seed_ai_models/migration.sql`. The last one seeds
-one `ai_models` row per entry in the server-owned model catalog
-(`src/server/ai/models/catalog.ts`): the row id is the catalog key, the provider is
-`OPENROUTER`, and `modelIdentifier`, `displayName`, and `isActive` mirror the catalog.
-It is idempotent (`INSERT … ON CONFLICT (id) DO UPDATE`), so re-running it reconciles
-the table with the code after a catalog change — add the entry to the catalog, then
-either rerun this migration or add a new seed migration. The table exists so
-`user_preferences.preferredModelId` has a real foreign key to reference;
-**no request-time decision reads it**: which models are offered, which identifier is
-used, and which model is the default all come from the code catalog, so the app boots,
-builds, and answers replies without a reachable database.
+`prisma/migrations/20260923020000_seed_ai_models/migration.sql` (OpenRouter rows),
+and `prisma/migrations/20260924000000_seed_nvidia_model/migration.sql` (one NVIDIA
+NIM row). Each seed's row id is the catalog key, and the `provider`,
+`modelIdentifier`, `displayName`, and `isActive` columns mirror the server-owned
+catalog (`src/server/ai/models/catalog.ts`). Both are idempotent
+(`INSERT … ON CONFLICT (id) DO UPDATE`). The NVIDIA migration adds **data only**:
+the `ModelProvider.NVIDIA` enum value and the table already existed. It is necessary
+because `user_preferences.preferredModelId` is a foreign key to `ai_models.id`;
+without this row the NVIDIA selection cannot be saved. **No request-time decision
+reads the model table**: which models are offered, which provider and identifier
+answer for each key, and which model is the default all come from the code catalog,
+so that metadata is available without a database round trip. A running session
+still needs a reachable database for its stored conversations and preferences.
 
 ## Opt-in PostgreSQL verification
 
@@ -249,7 +252,8 @@ are not represented as proof of concurrent transaction behavior.
 
 CI has a separate disposable PostgreSQL 17 service job for the standard native
 migration lifecycle: clean deploy, second deploy, status, schema diff, and these
-read-only checks. That workflow has been configured, **not run remotely here**.
+integration checks (which write and clean up test rows). That workflow was configured
+in the foundation step; this document does not claim it ran in the Task 24 sandbox.
 
 ## What was actually verified in this sandbox
 
@@ -279,6 +283,17 @@ server configuration only.
   in this sandbox), and the database suite confirms the rows exist, that a preference
   pointing at no model is refused by the constraint, and that one account's stored
   choice is untouched by another account's request.
+- **The NVIDIA provider step added a data-only seed, not a schema change.** The
+  existing `ModelProvider.NVIDIA` enum value and `ai_models` table are reused.
+  `prisma/migrations/20260924000000_seed_nvidia_model/migration.sql` inserts the
+  `nvidia-llama-3.3-70b` catalog row with provider `NVIDIA` so the existing foreign
+  key can save it as a per-user preference. The catalog is still in code, and a raw
+  provider identifier cannot be stored through the model route. Applying this new
+  migration to a real database has not been exercised in the current restricted
+  sandbox (no `DATABASE_TEST_URL` and no generated Prisma client); the unit test
+  checks its SQL row matches the catalog, and the opt-in database integration test
+  checks the row, provider, preference write, and account isolation when a migrated
+  test database is available.
 - **The settings step added no schema change either.** The theme preference reuses
   `user_preferences.theme` and its existing `ThemePreference` enum exactly as the
   initial migration created them: `src/server/settings/service.ts` upserts only that

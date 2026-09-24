@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolvePet } from "../src/features/pets/catalog";
 import { PetRenderer } from "../src/features/pets/components/pet-renderer";
 import { PET_REACTION_DURATIONS, PET_REACTION_EVENTS } from "../src/features/pets/reactions";
-import { usePetBehavior } from "../src/features/pets/use-pet-behavior";
+import { usePetBehavior, type PetBehavior } from "../src/features/pets/use-pet-behavior";
 
 /**
  * The behavior controller against a real React root in jsdom, so the parts a pure
@@ -243,5 +243,137 @@ describe("the behavior controller", () => {
 
     // The DOM is gone; nothing was written back into it.
     expect(container.querySelector(".pet-renderer")).toBeNull();
+  });
+});
+
+/**
+ * A harness that keeps the controller's setters after the component that owned them is
+ * gone — the shape a chat reporter arrives in when the stream it belongs to outlives
+ * the shell. The parent survives, holds what the child handed it in a ref, and offers
+ * buttons that call those setters once the child has been unmounted.
+ */
+function Captured({
+  pet,
+  personality,
+  onBehavior,
+}: {
+  pet: string;
+  personality?: string;
+  onBehavior: (behavior: PetBehavior) => void;
+}) {
+  const behavior = usePetBehavior({ pet, personality });
+  // No dependency list on purpose: the parent always holds the current controller,
+  // and this harness never re-renders with a different pet or personality.
+  useEffect(() => {
+    onBehavior(behavior);
+  });
+  return <PetRenderer pet={resolvePet(pet)} personality={personality} state={behavior.state} />;
+}
+
+function Survivor({ pet, personality }: { pet: string; personality?: string }) {
+  const saved = useRef<PetBehavior | null>(null);
+  const [show, setShow] = useState(true);
+  const remember = useCallback((behavior: PetBehavior) => {
+    saved.current = behavior;
+  }, []);
+
+  return (
+    <>
+      {show ? <Captured pet={pet} personality={personality} onBehavior={remember} /> : null}
+      <button type="button" className="t-unmount" onClick={() => setShow(false)}>
+        unmount
+      </button>
+      <button
+        type="button"
+        className="t-late-dispatch"
+        onClick={() => saved.current?.dispatch("response-completed")}
+      >
+        late dispatch
+      </button>
+      <button
+        type="button"
+        className="t-late-hold"
+        onClick={() => saved.current?.holdState("sleeping")}
+      >
+        late hold
+      </button>
+      <button type="button" className="t-late-reset" onClick={() => saved.current?.reset()}>
+        late reset
+      </button>
+    </>
+  );
+}
+
+describe("the behavior controller across configuration changes", () => {
+  it("does not let a state left by one personality decide the next one's reaction", () => {
+    mount(CAT, "sleepy");
+    // A drowsy companion dozes through `response-started`, and that reaction holds:
+    // there is no settle timer behind it, only the recorded state.
+    dispatchEvent("response-started");
+    expect(renderedState()).toBe("sleeping");
+
+    mount(CAT, "calm");
+    expect(renderedState()).toBe("idle");
+
+    // The cancellation is resolved for the calm pet from the state that pet is really
+    // in, not from the dozing record the sleepy personality left behind.
+    dispatchEvent("cancelled");
+    expect(renderedState()).toBe("idle");
+    expect(lastEvent()).toBe("cancelled");
+  });
+
+  it("does not let a state left by one pet decide the next one's reaction", () => {
+    mount(CAT, "sleepy");
+    dispatchEvent("response-started");
+    expect(renderedState()).toBe("sleeping");
+
+    mount(FOX, "curious");
+    expect(renderedState()).toBe("idle");
+
+    dispatchEvent("cancelled");
+    expect(renderedState()).toBe("idle");
+  });
+
+  it("keeps reading the current state within one configuration", () => {
+    mount(CAT, "sleepy");
+
+    dispatchEvent("response-started");
+    expect(renderedState()).toBe("sleeping");
+
+    // Still the same pet and personality, so the dozing rule still applies.
+    dispatchEvent("cancelled");
+    expect(renderedState()).toBe("sleeping");
+  });
+
+  it("ignores every setter that arrives after the controller is gone", () => {
+    act(() => {
+      root.render(<Survivor pet={CAT} personality="calm" />);
+    });
+    expect(renderedState()).toBe("idle");
+
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Unmount the controller, but not the harness that still holds its setters.
+    click(".t-unmount");
+    expect(container.querySelector(".pet-renderer")).toBeNull();
+
+    // A reporter from a generation that outlives its shell: nothing is written, and —
+    // the part that would otherwise leak — no settle timer is scheduled that no
+    // cleanup would ever clear.
+    timeoutSpy.mockClear();
+    click(".t-late-dispatch");
+    click(".t-late-hold");
+    click(".t-late-reset");
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    // Time passing afterwards changes nothing either.
+    advance(PET_REACTION_DURATIONS.lingering * 2);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(container.querySelector(".pet-renderer")).toBeNull();
+
+    timeoutSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });

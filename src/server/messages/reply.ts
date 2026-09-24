@@ -1,7 +1,9 @@
 import "server-only";
 import { AiNotConfiguredError, AiProviderError } from "../ai/errors";
-import { openRouterProvider } from "../ai/providers/openrouter";
+import { resolveReplyProvider } from "../ai/providers";
 import { resolveReplyModelKey } from "../ai/models/service";
+import { resolveAiPetContext, type AiPetContext } from "../ai/pet-context";
+import { buildPetAiInstruction } from "../ai/pet-instruction";
 import type { ChatTurn } from "../ai/types";
 import { createAssistantMessage, listMessages } from "./service";
 import type { MessageRole, MessageSummary } from "@/features/conversations/types";
@@ -17,7 +19,22 @@ import type { MessageRole, MessageSummary } from "@/features/conversations/types
  * streaming path forwards provider deltas as they come and stores the text once
  * the provider is finished; the non-streaming path waits for the whole answer.
  * Nothing about ownership, history, limits, or persistence is duplicated.
+ *
+ * Which provider answers is not decided here either. The prepared turn carries a
+ * catalog model key, `resolveReplyProvider` maps that key to the adapter that owns
+ * it, and this file talks to the returned `ReplyProvider` — so both paths stay
+ * provider-neutral and a second AI service costs nothing here.
+ *
+ * Preparation also resolves the caller's **companion context** (`AiPetContext`) —
+ * the safe, catalog-resolved projection of their stored pet and personality. The
+ * same server-side builder turns it into one short instruction at the front of both
+ * providers' messages. The adapters still receive only roles, text, and a catalog
+ * model key; neither they nor the browser know about pets or preferences. Like the
+ * model key, the context is resolved from the session user — never the request body.
  */
+
+/** Stored conversation history never supplies a system role; only the builder does. */
+type StoredHistoryTurn = ChatTurn & { role: "user" | "assistant" };
 
 /** Newest messages considered as context; no summarization or memory yet. */
 export const REPLY_HISTORY_MAX_MESSAGES = 40;
@@ -36,8 +53,8 @@ export const REPLY_HISTORY_MAX_CHARACTERS = 24_000;
  */
 export function buildProviderTurns(
   messages: readonly { role: MessageRole; content: string }[],
-): ChatTurn[] {
-  const turns: ChatTurn[] = [];
+): StoredHistoryTurn[] {
+  const turns: StoredHistoryTurn[] = [];
   let characters = 0;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -71,32 +88,50 @@ export type PreparedReply = {
   conversationId: string;
   /** The user turn this reply answers; the write is refused if it is no longer newest. */
   answeredMessageId: string;
-  turns: ChatTurn[];
+  turns: StoredHistoryTurn[];
   /**
    * Catalog key of the model to generate with: the signed-in user's saved choice
    * when it is still offered, otherwise the configured default. It is a key from
    * the server-owned catalog, never a provider identifier and never anything a
-   * browser sent; the adapter resolves it to the OpenRouter identifier.
+   * browser sent. It selects the adapter as well: the adapter that owns this key
+   * resolves it to its own provider identifier.
    */
   modelKey: string;
+  /**
+   * The caller's companion, resolved server-side from their own stored preferences
+   * and narrowed to the AI contract in `../ai/pet-context`: a catalog pet id and
+   * name, plus a personality id, name, traits, and hints that always belongs to
+   * that pet. Missing, stale, unavailable, or incompatible selections degrade to
+   * the documented catalog defaults, so this is always a usable value and never a
+   * reason for a reply to fail.
+   *
+   * It carries no user id, no appearance, no stored preference row, and no
+   * credential. `buildPetAiInstruction` consumes only this projection and builds
+   * one fixed, compact system message above both provider adapters.
+   */
+  petContext: AiPetContext;
 };
 
 export type ReplyPreparation = PreparedReply | { ok: false; reason: ReplyFailureReason };
 
 /**
  * The first half of both reply paths: resolve the owned conversation, find the
- * newest turn, and build the provider history. Everything here happens before a
- * stream starts, so an unknown or foreign conversation, an empty conversation,
- * and a turn that already has a reply are answered with an ordinary JSON error.
+ * newest turn, build the provider history, and resolve the caller's own
+ * preferences — the model to generate with and the companion context. Everything
+ * here happens before a stream starts, so an unknown or foreign conversation, an
+ * empty conversation, and a turn that already has a reply are answered with an
+ * ordinary JSON error.
  */
 export async function prepareReply(
   userId: string,
   conversationId: string,
 ): Promise<ReplyPreparation> {
-  // The history and the user's model preference are independent reads.
-  const [page, modelKey] = await Promise.all([
+  // Three independent reads, each keyed by the session user and none of them by
+  // anything the request carried.
+  const [page, modelKey, petContext] = await Promise.all([
     listMessages(userId, conversationId),
     resolveReplyModelKey(userId),
+    resolveAiPetContext({ id: userId }),
   ]);
   if (!page) return { ok: false, reason: "not-found" };
 
@@ -112,7 +147,19 @@ export async function prepareReply(
     answeredMessageId: latest.id,
     turns: buildProviderTurns(page.messages),
     modelKey,
+    petContext,
   };
+}
+
+/**
+ * The single provider-neutral message boundary for JSON and streaming replies.
+ * Stored rows can contribute only user/assistant turns; the first system message
+ * comes from the trusted context's code-owned trait/hint guidance. Build it once
+ * per generation, before the provider starts, and never alter it mid-stream.
+ */
+function buildReplyMessages(prepared: PreparedReply): ChatTurn[] {
+  const { systemInstruction } = buildPetAiInstruction(prepared.petContext);
+  return [{ role: "system", content: systemInstruction }, ...prepared.turns];
 }
 
 /** Provider failures translated into the shared vocabulary; `null` means unexpected. */
@@ -180,8 +227,10 @@ export async function generateAssistantReply(
 
   let content: string;
   try {
-    // The model comes from the server catalog, keyed by the user's stored choice.
-    content = await openRouterProvider.generateReply(prepared.turns, {
+    // The catalog selects the adapter; the common message builder puts the
+    // server-resolved personality instruction before stored conversation turns.
+    const provider = resolveReplyProvider(prepared.modelKey);
+    content = await provider.generateReply(buildReplyMessages(prepared), {
       model: prepared.modelKey,
     });
   } catch (error) {
@@ -221,9 +270,11 @@ export async function* streamAssistantReply(
   let text = "";
   try {
     const model = { model: prepared.modelKey };
+    const provider = resolveReplyProvider(prepared.modelKey);
+    const messages = buildReplyMessages(prepared);
     const stream = options.signal
-      ? openRouterProvider.streamReply(prepared.turns, { ...model, signal: options.signal })
-      : openRouterProvider.streamReply(prepared.turns, model);
+      ? provider.streamReply(messages, { ...model, signal: options.signal })
+      : provider.streamReply(messages, model);
     for await (const chunk of stream) {
       text += chunk.text;
       yield { type: "delta", text: chunk.text };

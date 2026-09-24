@@ -13,6 +13,11 @@ import "server-only";
  * first configured key. Rotation is round-robin, so consecutive requests spread
  * across the configured keys instead of always starting with the first one, and a
  * key that was just rejected is skipped until its short cooldown expires.
+ *
+ * One pool belongs to one provider: `getKeyPool` takes a scope so that two
+ * providers can never share cooldown state, not even when they are configured with
+ * the same key strings. A key NVIDIA rejects therefore has no effect on the
+ * OpenRouter keys, and vice versa.
  */
 
 /**
@@ -95,14 +100,21 @@ export function createKeyPool(
 }
 
 /**
- * Pools are cached per configured key list so that a cooldown survives between
- * requests, which is the whole point of quarantining a key. A different key list
- * (a redeploy, or a test that stubs new values) gets its own pool.
+ * Pools are cached per provider scope and configured key list so that a cooldown
+ * survives between requests, which is the whole point of quarantining a key. A
+ * different key list (a redeploy, or a test that stubs new values) or a different
+ * provider gets its own pool.
+ *
+ * `scope` names the provider the keys belong to. It is optional and defaults to the
+ * empty scope, which is what the incumbent OpenRouter adapter uses; every provider
+ * added after it passes its own name so that identical key strings — a shared test
+ * fixture, or one credential accepted by both services — still rotate and cool down
+ * independently.
  */
 const pools = new Map<string, KeyPool>();
 
-export function getKeyPool(keys: readonly string[]): KeyPool {
-  const signature = keys.join("\u0000");
+export function getKeyPool(keys: readonly string[], scope = ""): KeyPool {
+  const signature = `${scope}\u0001${keys.join("\u0000")}`;
   const cached = pools.get(signature);
   if (cached) return cached;
 

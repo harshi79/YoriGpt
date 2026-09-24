@@ -34,7 +34,12 @@ const optionalModelName = z.preprocess(
   required.optional(),
 );
 
-/** The trimmed value of OPENROUTER_MODEL, or `undefined` when it is blank/missing. */
+/**
+ * The trimmed value of OPENROUTER_MODEL, or `undefined` when blank/missing. This
+ * legacy name is the deployment's default **catalog** model: it stays OpenRouter by
+ * default, but an operator may explicitly name a NVIDIA catalog entry. It is never
+ * a raw execution identifier; the catalog must confirm the model is active.
+ */
 export function getConfiguredModelName(): string | undefined {
   const parsed = optionalModelName.safeParse(process.env.OPENROUTER_MODEL);
   return parsed.success ? parsed.data : undefined;
@@ -92,6 +97,7 @@ const schemas = {
     OPENROUTER_MODEL: optionalModelName,
   }),
   nvidia: z.object({
+    // Only read by the NVIDIA adapter when a NVIDIA catalog model was chosen.
     NVIDIA_API_KEYS: apiKeys,
     NVIDIA_BASE_URL: httpUrl.default("https://integrate.api.nvidia.com/v1"),
   }),

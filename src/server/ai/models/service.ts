@@ -9,8 +9,8 @@ import { findCatalogModel, isSelectableModelKey, resolveStoredModelKey } from ".
  * belongs to that user's own `user_preferences` row, so one account can never read
  * or change another account's selection.
  *
- * The stored value is a catalog **key** — the `ai_models.id` the seed migration
- * inserts — never an OpenRouter identifier supplied by a client. A key that is
+ * The stored value is a catalog **key** — the `ai_models.id` the seed migrations
+ * insert — never a provider identifier supplied by a client. A key that is
  * unknown, or that names a retired model, is not an error: generation falls back to
  * the documented default so an old preference cannot break replies.
  */
@@ -52,10 +52,10 @@ export async function saveSelectedModelKey(
     return { ok: true, modelKey };
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
-      // The preference column references `ai_models`; a missing row means the
-      // catalog seed migration has not been applied to this database.
+      // The preference column references `ai_models`; a missing row means one
+      // of the model seed migrations has not been applied to this database.
       console.error(
-        "[models] Could not store the model preference: the catalog rows are missing (apply the seed_ai_models migration).",
+        "[models] Could not store the model preference: the catalog row is missing (apply the seed_ai_models and seed_nvidia_model migrations).",
       );
       return { ok: false, reason: "unavailable" };
     }

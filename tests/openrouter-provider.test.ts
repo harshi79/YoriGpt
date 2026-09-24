@@ -108,6 +108,43 @@ describe("OpenRouter request construction", () => {
     ]);
     expect(JSON.stringify(body)).not.toContain("position");
     expect(JSON.stringify(body)).not.toContain("createdAt");
+    // The adapter does not add pet metadata or instructions on its own. This direct
+    // call supplied only conversation turns; the reply service prepends an instruction
+    // when generating on behalf of an authenticated account.
+    const sent = JSON.stringify(body);
+    expect(Object.keys(body).sort()).toEqual(["messages", "model", "stream"]);
+    for (const forbidden of [
+      "pet",
+      "personality",
+      "companion",
+      "traits",
+      "restingState",
+      "motionLevel",
+      "uiPreferences",
+      "selectedPetKey",
+    ])
+      expect(sent, forbidden).not.toContain(forbidden);
+  });
+
+  it("passes a prebuilt system message through JSON and streaming unchanged", async () => {
+    configure();
+    const instruction = "Answer accurately in a gentle tone.";
+    const messages = [{ role: "system" as const, content: instruction }, ...turns];
+    const calls = stubFetch((request) =>
+      request.headers.get("accept") === "text/event-stream"
+        ? streamedResponse([chunkFrame("ok"), STREAM_DONE])
+        : completion("ok"),
+    );
+
+    await expect(generateReply(messages)).resolves.toBe("ok");
+    await collect(streamReply(messages));
+
+    expect(calls).toHaveLength(2);
+    for (const request of calls) {
+      const body = (await request.clone().json()) as { messages: unknown };
+      expect(body.messages).toEqual(messages);
+      expect(JSON.stringify(body)).not.toContain("uiPreferences");
+    }
   });
 
   it("honours a configured base URL", async () => {
@@ -120,16 +157,39 @@ describe("OpenRouter request construction", () => {
     expect(((await calls[0].clone().json()) as { model: string }).model).toBe("openai/gpt-4o");
   });
 
-  it("resolves every catalog key to its OpenRouter identifier", async () => {
+  it("resolves every OpenRouter catalog key to its identifier", async () => {
     configure();
     const calls = stubFetch(() => completion("ok"));
+    const own = MODEL_CATALOG.filter((entry) => entry.active && entry.provider === "openrouter");
+    expect(own.length).toBeGreaterThan(0);
 
-    for (const model of MODEL_CATALOG.filter((entry) => entry.active)) {
+    for (const model of own) {
       await generateReply([{ role: "user", content: "Hi" }], { model: model.key });
       expect(((await calls.at(-1)!.clone().json()) as { model: string }).model).toBe(
         model.modelIdentifier,
       );
     }
+  });
+
+  it("refuses a catalog key another provider serves, before any request", async () => {
+    configure();
+    const calls = stubFetch(() => completion("ok"));
+    const foreign = MODEL_CATALOG.find((entry) => entry.active && entry.provider !== "openrouter");
+    expect(foreign, "the catalog should offer a second provider").toBeDefined();
+
+    // The dispatcher never routes a foreign key here, but the adapter refuses it on
+    // its own too: a NVIDIA model can never be sent to OpenRouter, whatever picked
+    // the key. Like an unknown key, this is a programming error rather than a
+    // provider fault, so no key is spent and nothing is quarantined.
+    const caught = await generateReply(turns, { model: foreign!.key }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      `Model key served by another provider: ${foreign!.key} (${foreign!.provider}, not openrouter)`,
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it("uses the default model when the caller does not name one", async () => {
@@ -270,6 +330,20 @@ describe("OpenRouter failures", () => {
     expect(error.message).not.toContain("invalid key");
   });
 
+  it("refuses a 200 provider error even when it also contains assistant text", async () => {
+    configure();
+    stubFetch(() =>
+      new Response(JSON.stringify({
+        error: { message: `failed for ${KEY}` },
+        choices: [{ message: { content: "Incomplete answer" }, finish_reason: "error" }],
+      })),
+    );
+
+    const error = await failureOf(generateReply(turns));
+    expect(error.reason).toBe("malformed-response");
+    expect(JSON.stringify(error)).not.toContain(KEY);
+  });
+
   it("treats malformed and empty responses as failures", async () => {
     configure();
 
@@ -285,6 +359,16 @@ describe("OpenRouter failures", () => {
     expect((await failureOf(generateReply(turns))).reason).toBe("empty-response");
   });
 
+  it("enforces the JSON size limit while reading, without buffering via Response.text", async () => {
+    configure();
+    const response = new Response(new Uint8Array(1_000_001));
+    const readWholeBody = vi.spyOn(response, "text");
+    stubFetch(() => response);
+
+    expect((await failureOf(generateReply(turns))).reason).toBe("malformed-response");
+    expect(readWholeBody).not.toHaveBeenCalled();
+  });
+
   it("reports a network failure without leaking the key", async () => {
     configure();
     vi.stubGlobal("fetch", async () => {
@@ -294,6 +378,18 @@ describe("OpenRouter failures", () => {
     const error = await failureOf(generateReply(turns));
     expect(error.reason).toBe("network-error");
     expect(String(error)).not.toContain(KEY);
+  });
+
+  it("does not retain a network cause that could echo the provider key", async () => {
+    configure();
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError(`failed for ${KEY}`);
+    });
+
+    const error = await failureOf(generateReply(turns));
+    expect(error.reason).toBe("network-error");
+    expect(error.cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(KEY);
   });
 
   it("never puts the key in a provider error message", async () => {
@@ -632,6 +728,17 @@ describe("OpenRouter streaming requests", () => {
     expect(deltas.map((delta) => delta.text).join("")).toBe(`Partial ${emoji}`);
   });
 
+  it("keeps a CRLF split across reads inside one multi-line SSE frame", async () => {
+    configure();
+    stubFetch(() => streamedResponse([
+      'data: {"choices":[{"delta":\r',
+      '\ndata: {"content":"From one frame"}}]}\r\n\r\n',
+      STREAM_DONE,
+    ]));
+
+    expect((await collect(streamReply(turns))).map((delta) => delta.text)).toEqual(["From one frame"]);
+  });
+
   it("normalizes deltas so no provider field escapes the adapter", async () => {
     configure();
     stubFetch(() => streamedResponse([chunkFrame("A"), chunkFrame("B"), STREAM_DONE]));
@@ -664,6 +771,34 @@ describe("OpenRouter streaming requests", () => {
 });
 
 describe("OpenRouter streaming failures", () => {
+  it("does not turn an upstream error frame followed by [DONE] into a stored reply", async () => {
+    configure({ keys: `${KEY},another-test-key` });
+    const calls = stubFetch(() =>
+      streamedResponse([
+        chunkFrame("Provisional text"),
+        `data: ${JSON.stringify({ error: { message: `failed for ${KEY}` } })}\n\n`,
+        STREAM_DONE,
+      ]),
+    );
+    const deltas: string[] = [];
+    const error = await collectFailure(async () => {
+      for await (const chunk of streamReply(turns)) deltas.push(chunk.text);
+    });
+
+    expect(deltas).toEqual(["Provisional text"]);
+    expect(error.reason).toBe("malformed-response");
+    expect(JSON.stringify(error)).not.toContain(KEY);
+    expect(calls).toHaveLength(1); // never rotate after a delta
+  });
+
+  it("does not treat a finish_reason of error as successful completion", async () => {
+    configure();
+    stubFetch(() => streamedResponse([chunkFrame("Provisional"), chunkFrame("", { finish_reason: "error" })]));
+
+    const error = await failureOf(collect(streamReply(turns)));
+    expect(error.reason).toBe("malformed-response");
+  });
+
   it("refuses to treat a stream without a completion marker as an answer", async () => {
     configure();
     stubFetch(() => streamedResponse([chunkFrame("Cut off halfway")]));

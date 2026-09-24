@@ -81,6 +81,30 @@ describe("server environment configuration", () => {
     expect(getServerEnv("openrouter").OPENROUTER_MODEL).toBeUndefined();
   });
 
+  it("reads NVIDIA credentials lazily, separately, and without leaking them in errors", () => {
+    vi.stubEnv("OPENROUTER_API_KEYS", "openrouter-test-key-not-a-secret");
+    vi.stubEnv("NVIDIA_API_KEYS", undefined);
+    // Configuring only OpenRouter still works. The NVIDIA scope is not validated
+    // while importing adapters, listing catalog models, or answering through the
+    // incumbent provider.
+    expect(getServerEnv("openrouter").OPENROUTER_API_KEYS).toEqual([
+      "openrouter-test-key-not-a-secret",
+    ]);
+    expect(() => getServerEnv("nvidia")).toThrow(/NVIDIA_API_KEYS/);
+
+    vi.stubEnv("OPENROUTER_API_KEYS", undefined);
+    vi.stubEnv("NVIDIA_API_KEYS", "  nvidia-first-test-key  , , nvidia-second-test-key ,");
+    vi.stubEnv("NVIDIA_BASE_URL", undefined);
+    expect(getServerEnv("nvidia")).toEqual({
+      NVIDIA_API_KEYS: ["nvidia-first-test-key", "nvidia-second-test-key"],
+      NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1",
+    });
+
+    vi.stubEnv("NVIDIA_BASE_URL", "invalid-url-with-private-value");
+    expect(() => getServerEnv("nvidia")).toThrow(/NVIDIA_BASE_URL/);
+    expect(() => getServerEnv("nvidia")).not.toThrow(/private-value/);
+  });
+
   it("rejects a key list with no usable entry and unchanged placeholders", () => {
     // Blank entries are ignored, so a trailing comma alone is not an error.
     vi.stubEnv("NVIDIA_API_KEYS", "test-key,");

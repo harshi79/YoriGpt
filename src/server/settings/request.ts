@@ -1,4 +1,5 @@
 import "server-only";
+import { readBoundedRequestBody } from "../api/request-body";
 import { isThemeValue, THEME_VALUES, type ThemeValue } from "@/features/settings/types";
 
 /**
@@ -20,12 +21,11 @@ export type ParsedSettingsUpdate =
 
 export async function parseSettingsRequest(request: Request): Promise<ParsedSettingsUpdate> {
   const contentType = request.headers.get("content-type") ?? "";
-  const raw = await request.text();
+  const raw = await readBoundedRequestBody(request, MAX_SETTINGS_REQUEST_BYTES);
+  if (raw === null) return { ok: false, message: "That request is too large." };
   const body = raw.trim();
 
   if (body === "") return { ok: false, message: "Send a JSON object with a theme." };
-  if (body.length > MAX_SETTINGS_REQUEST_BYTES)
-    return { ok: false, message: "That request is too large." };
   if (!contentType.toLowerCase().includes("application/json"))
     return { ok: false, message: "Send this request as JSON." };
 

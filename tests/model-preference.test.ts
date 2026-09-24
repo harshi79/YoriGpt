@@ -68,6 +68,15 @@ describe("reading a saved model preference", () => {
     await expect(resolveReplyModelKey(userId)).resolves.toBe("claude-3.7-sonnet");
   });
 
+  it("resolves a saved NVIDIA model for one user without changing another", async () => {
+    const chosen = "nvidia-llama-3.3-70b";
+    fake.state.rows.set(userId, { userId, preferredModelId: chosen });
+    fake.state.rows.set(otherUserId, { userId: otherUserId, preferredModelId: "gpt-4o" });
+
+    await expect(resolveReplyModelKey(userId)).resolves.toBe(chosen);
+    await expect(resolveReplyModelKey(otherUserId)).resolves.toBe("gpt-4o");
+  });
+
   it("falls back to the default when nothing is stored", async () => {
     await expect(resolveReplyModelKey(userId)).resolves.toBe(DEFAULT_MODEL_KEY);
   });
@@ -102,6 +111,15 @@ describe("saving a model preference", () => {
     await expect(getSelectedModelKey(userId)).resolves.toBe("gpt-4o");
   });
 
+  it("stores a NVIDIA catalog key in the same user-scoped preference column", async () => {
+    const chosen = "nvidia-llama-3.3-70b";
+    expect(await saveSelectedModelKey(userId, chosen)).toEqual({ ok: true, modelKey: chosen });
+    expect(fake.state.upserts[0].where).toEqual({ userId });
+    expect(fake.state.upserts[0].update).toEqual({ preferredModelId: chosen });
+    expect(fake.state.upserts[0].create).toEqual({ userId, preferredModelId: chosen });
+    await expect(resolveReplyModelKey(userId)).resolves.toBe(chosen);
+  });
+
   it("refuses an unknown key without writing anything", async () => {
     const result = await saveSelectedModelKey(userId, "not-a-model");
 
@@ -115,6 +133,10 @@ describe("saving a model preference", () => {
       reason: "unavailable",
     });
     expect(await saveSelectedModelKey(userId, "openai/gpt-4o")).toEqual({
+      ok: false,
+      reason: "unknown-model",
+    });
+    expect(await saveSelectedModelKey(userId, "meta/llama-3.3-70b-instruct")).toEqual({
       ok: false,
       reason: "unknown-model",
     });

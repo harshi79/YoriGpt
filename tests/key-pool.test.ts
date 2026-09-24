@@ -133,6 +133,31 @@ describe("key pool configuration", () => {
     expect([pool.select(), pool.select()]).toEqual([A, B]);
   });
 
+  it("isolates NVIDIA cooldown and rotation even with identical configured keys", () => {
+    const openrouter = getKeyPool([A, B]);
+    const nvidia = getKeyPool([A, B], "nvidia");
+    expect(nvidia).not.toBe(openrouter);
+    expect(getKeyPool([A, B], "nvidia")).toBe(nvidia);
+
+    // NVIDIA rejects a key. The OpenRouter pool still starts at its own first
+    // key, has no rejection status, and continues independently.
+    expect(nvidia.select()).toBe(A);
+    nvidia.reportFailure(A, 401);
+    expect(nvidia.select()).toBe(B);
+    expect(openrouter.lastStatus).toBeUndefined();
+    expect(openrouter.select()).toBe(A);
+
+    // A rejection in the incumbent pool cannot reset or change NVIDIA's state.
+    openrouter.reportFailure(B, 429);
+    expect(openrouter.select()).toBe(A);
+    expect(nvidia.lastStatus).toBe(401);
+    expect(nvidia.select()).toBe(B);
+
+    resetKeyPools();
+    expect(getKeyPool([A, B])).not.toBe(openrouter);
+    expect(getKeyPool([A, B], "nvidia")).not.toBe(nvidia);
+  });
+
   it("reuses one pool per configured key list and forgets it on reset", () => {
     const first = getKeyPool([A, B]);
 

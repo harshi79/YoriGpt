@@ -1,20 +1,18 @@
 # YoriGPT
 
-A Node.js application foundation, responsive chat shell, PostgreSQL data
-foundation, email/password authentication, a **user-scoped conversation and message
-data flow**, **streaming OpenRouter assistant replies**, and **account settings with
-a persistent theme preference** for YoriGPT. One
-server-side provider streams a reply for a stored user message over server-sent
-events while the browser renders it, and the finished answer is stored; several
-OpenRouter keys rotate with a short cooldown when one is refused or rate limited,
-and now a foundational **interactive 2D pet framework** with a development
-playground, **persistent per-account pet selection**, persistent personalities, and a
-deterministic local reaction engine that follows the real chat lifecycle — while
-other settings still do not exist. The home route is an original
-charcoal-and-mint interface — with a light palette behind the theme preference —
-ready for later service integration. The chat shell
-stays usable for signed-out visitors, but conversations belong to an authenticated
-account: they are created, listed, opened, and deleted only for their owner.
+A Node.js application with a responsive chat shell, PostgreSQL data foundation,
+email/password authentication, and a **user-scoped conversation and message flow**.
+Assistant replies can stream from **OpenRouter or NVIDIA NIM**: the server chooses a
+provider from its own model catalog, streams a provider-neutral answer over SSE,
+and stores the reply only after the generation completes. Each provider has its own
+server-only, rotating key pool; the existing OpenRouter model remains the default.
+Account settings include a persistent theme preference. The interactive 2D pet
+framework has persistent per-account selection and personalities and a deterministic
+local reaction engine that follows the real chat lifecycle. A compact, server-owned
+personality instruction now influences replies from either provider without replacing
+those deterministic visual reactions or turning the assistant into a pet roleplay.
+Signed-out visitors can view the chat shell, but conversations belong to an
+authenticated account.
 
 ## Prerequisites
 
@@ -82,9 +80,10 @@ Playwright starts the production server on port 3100. Set `DATABASE_TEST_URL` to
 disposable migrated database (the same variable as `npm run test:db`) to enable the
 four signed-in conversation checks; without it they are skipped and the rest of the
 suite still runs. On restricted development machines,
-`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing Chromium binary instead. The normal browser download was blocked in this sandbox; checks
-were completed with a separately installed Chromium executable, outside the
-project dependencies. Browser binaries and screenshots are not committed.
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing Chromium binary instead.
+Browser checks completed in an earlier environment with a separately installed
+Chromium; no browser executable was available for Task 24. Browser binaries and
+screenshots are not committed.
 
 ## Visual application shell
 
@@ -152,23 +151,26 @@ All configuration below is **server-only**:
 | `AUTH_SECRET`                                | Authentication is used; random secret, at least 32 characters        |
 | `AUTH_TRUSTED_ORIGINS`                       | Extra deployed/preview origins may call the auth API (optional)       |
 | `SMTP_URL`, `EMAIL_FROM`                     | Verification/reset emails should be delivered (optional)             |
-| `OPENROUTER_API_KEYS`                        | Assistant replies should be generated; comma-separated and rotated (otherwise they report "not configured") |
+| `OPENROUTER_API_KEYS`                        | An OpenRouter model is selected; comma-separated, rotated server-side |
 | `OPENROUTER_BASE_URL`                        | Optional; defaults to `https://openrouter.ai/api/v1`                 |
-| `OPENROUTER_MODEL`                           | Optional; names the **default** model when it matches an active catalog entry (otherwise the catalog default is used and a warning is logged once) |
-| `NVIDIA_API_KEYS`, `NVIDIA_BASE_URL`         | Future NVIDIA integration is used                                    |
+| `OPENROUTER_MODEL`                           | Optional legacy default name; an active catalog key or identifier (defaults to OpenRouter's `gpt-4o-mini` when unset) |
+| `NVIDIA_API_KEYS`                            | A NVIDIA model is selected; comma-separated, rotated in a separate pool |
+| `NVIDIA_BASE_URL`                            | Optional; defaults to `https://integrate.api.nvidia.com/v1`          |
 
 `src/server/env.ts` exports `getServerEnv(scope)`. Validation runs **only when
 called**, for the selected scope, not on import. Call it inside the relevant
 server service, never at module scope or in the root layout. It rejects invalid
 URLs, missing credentials, short authentication secrets, and a key list with no
 usable entry (blank entries inside a list are ignored). Errors identify fields without
-printing their values. Provider URLs have defaults and `OPENROUTER_MODEL` is optional; API keys
-have none. Which model a reply uses is decided by the server catalog
-(`src/server/ai/models/catalog.ts`), never by a request body. A key list is read once per request from this layer and handed to the
-server-only key pool, which owns rotation. Streaming reuses the same variables: there
-is no separate streaming key, endpoint, or model. Absent credentials never break the build or
-the stored-message flow: the reply endpoint answers a controlled
-`AI_NOT_CONFIGURED` error and says so in the UI.
+printing their values. Provider URLs have defaults and `OPENROUTER_MODEL` is optional;
+API keys have none. The current model is chosen from the server catalog
+(`src/server/ai/models/catalog.ts`), never by a reply request body; that entry
+selects the provider. A key list is read only for the selected provider and handed
+to its isolated server-only key pool. Streaming reuses the same variables: there is
+no separate streaming key, endpoint, or model. Absent credentials never break the
+build or the stored-message flow: a reply through the unconfigured provider answers
+a controlled `AI_NOT_CONFIGURED` error. OpenRouter continues working without any
+NVIDIA credential, and the reverse is true for a selected NVIDIA model.
 
 The `server-only` import prevents this module from entering a client component's
 import graph. Never use `NEXT_PUBLIC_` for secrets, pass configuration objects to
@@ -212,12 +214,13 @@ accounts and sessions keep working. See
 ## Database foundation
 
 The PostgreSQL schema defines `User`, `Session`, `Account`, `Verification`,
-`Conversation`, `Message`, `AiModel`, and `UserPreferences`, with two reviewed
-migrations (foundation and Better Auth) and a lazy server-only client in
-`src/server/db/client.ts`. The chat UI reads and writes `conversations` and the
-owner's `messages` through the server-side services; `ai_models` and
-`user_preferences` remain unused. There are no seed records, session-token
-fixtures, or demo conversations.
+`Conversation`, `Message`, `AiModel`, and `UserPreferences`, with foundation and
+auth migrations plus two catalog seed migrations and a lazy server-only client in
+`src/server/db/client.ts`. The server reads and writes owned conversations and
+messages; `ai_models` contains seeded catalog rows, and `user_preferences` stores
+the account's model, theme, and pet keys. Provider API keys, demo conversations,
+pet reactions, and personality instructions are not stored; Better Auth separately
+stores password hashes and sessions in its own tables.
 
 Prisma CLI, client, and PostgreSQL adapter are pinned at **6.19.3**. Run
 `npm run db:generate` after installation and schema changes; this needs only a
@@ -233,7 +236,7 @@ Database commands:
 - The auth migration `20260923010000_add_better_auth` is additive: it creates
   `sessions`, `accounts`, and `verifications` only.
 - `npm run db:migrate -- --name <name>` — future development schema changes only.
-- `DATABASE_TEST_URL=... npm run test:db` — opt-in read-only PostgreSQL checks.
+- `DATABASE_TEST_URL=... npm run test:db` — opt-in checks against a disposable, migrated PostgreSQL database.
 
 **Sandbox limitation:** standard native Prisma commands still fail to download
 engines because TLS to `binaries.prisma.sh` is terminated. Validation, generation,
@@ -275,11 +278,14 @@ transaction that first updates the parent conversation (activity timestamp for t
 sidebar order) — the row lock serializes concurrent writers, and the
 `(conversationId, position)` unique constraint turns any remaining race into a
 retry instead of a duplicate position. Invalid or oversized input is rejected, never
-truncated. `GET` returns the stored messages in ascending position order, capped at
-500 with a `truncated` flag. There is no role, admin, bulk, or assistant-message
-authorization, and no message editing or deletion yet.
+truncated. The app-owned conversation, message, reply, model, pet, and settings
+write parsers bound incoming bytes before trimming or parsing, even if
+`Content-Length` is absent or inaccurate; a large padded `{}` cannot start a reply
+or save a setting. `GET` returns the stored messages in ascending
+position order, capped at 500 with a `truncated` flag. There is no role, admin, bulk,
+or assistant-message authorization, and no message editing or deletion yet.
 
-## Assistant replies (OpenRouter)
+## Assistant replies (OpenRouter and NVIDIA NIM)
 
 `POST /api/conversations/:id/reply` is the **only** generation endpoint — there is no
 `/api/chat` and no `/api/providers`. (`GET`/`PUT /api/models` exist, but only to list
@@ -301,18 +307,29 @@ The endpoint answers two encodings of the same generation:
 
 Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
 
-- `src/server/ai/providers/openrouter.ts` is the single adapter. It calls the official
-  OpenAI-compatible `POST {baseUrl}/chat/completions` with `{ model, messages, stream:
-  true }` (`stream: false` for the JSON path) — where `model` is the OpenRouter
-  identifier the catalog resolved from the selected catalog key — the key from
-  `OPENROUTER_API_KEYS`, a
-  30-second overall deadline, a 1 MB response/stream cap, a 16,000-character reply
-  cap, and only status codes in its logs — never the key, the prompt, or the provider
-  body. Failures are normalized to `timeout`, `aborted`, `http-error`,
-  `malformed-response`, `empty-response`, `network-error`, or `too-long`.
-- `src/server/ai/key-pool/` owns key selection and nothing else: it reads the keys
-  through the env layer, hands them out in deterministic round-robin order, and skips
-  a key the provider rejected (401/403) or rate limited (429) for a 30-second cooldown
+- `src/server/ai/providers/index.ts` dispatches from the **selected catalog key**
+  to its entry's provider, and then to exactly one adapter. No browser request can
+  supply a separate provider. OpenRouter and NVIDIA implement the same
+  `ReplyProvider` interface without moving orchestration, database logic, or pet
+  context into either adapter. OpenRouter remains the default; its adapter now also
+  rejects upstream error frames, bounds non-streamed response reads, and discards
+  untrusted network error causes that could echo a key.
+- Each adapter calls its official OpenAI-compatible
+  `POST {baseUrl}/chat/completions` with exactly `{ model, messages, stream }`:
+  the `model` identifier comes from that provider's catalog entry, never from a
+  browser or an untrusted preference. NVIDIA's hosted endpoint is
+  [`https://integrate.api.nvidia.com/v1/chat/completions`](https://docs.api.nvidia.com/nim/reference/llm-apis).
+  Its [Llama 3.3 70B NIM API](https://docs.api.nvidia.com/nim/reference/meta-llama-3_3-70b-instruct-infer)
+  documents both the model identifier and `data: [DONE]` SSE streaming. Only the
+  chosen provider's server-only key signs the request. Each adapter has a 30-second
+  overall deadline, a 1 MB response/stream cap, a 16,000-character streaming reply
+  cap, and status-only logs — never keys, prompts, authorization headers, or raw
+  provider bodies. Failures use the same categories: `timeout`, `aborted`,
+  `http-error`, `malformed-response`, `empty-response`, `network-error`, or
+  `too-long`.
+- `src/server/ai/key-pool/` owns key selection and nothing else: it receives keys
+  validated by the env layer, hands them out in deterministic round-robin order, and skips
+  a key its provider rejected (401/403) or rate limited (429) for a 30-second cooldown
   before it becomes eligible again. One request tries at most
   `min(configured keys, 3)` keys and never the same key twice, so rotation is bounded
   and a single request cannot hammer a failing key. Only failures another key could
@@ -320,22 +337,74 @@ Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
   attempts are reported as they are. Streaming rotates only before the first delta is
   forwarded: once the browser has answer text, a failure is reported exactly as
   before rather than splicing two answers together. Cooldown state is per process and
-  in memory (never in PostgreSQL), and key values never reach a log line, an SSE
-  event, an error message, or the client bundle.
-- The adapter owns OpenRouter's framing entirely: it parses the stream incrementally
-  (frames split across reads, CRLF endings, a UTF-8 character split across chunks, `:`
-  keep-alive comments, unknown fields), ends on `data: [DONE]` **or** a chunk carrying
-  `finish_reason`, and yields one normalized `{ type: "delta", text }` per provider
-  chunk. A stream that stops before either marker is a `malformed-response`, so a
-  truncated answer can never be mistaken for a finished one. No provider payload
-  reaches the service, the route, or the browser.
+  in memory (never in PostgreSQL) and keyed by **provider plus configured key list**:
+  NVIDIA and OpenRouter cannot share a cooldown or cursor even if their configured
+  strings happen to match. A 5xx or network failure may retry with another key
+  without quarantining it; a non-retryable response, timeout, abort, or an answer
+  that has emitted its first delta cannot rotate. Key values never reach a log
+  line, SSE event, error message, or client bundle.
+- Each adapter owns its upstream SSE framing. Both handle frames split across
+  reads (including CRLF and UTF-8 splits), keep-alives, empty and usage-only chunks,
+  `data: [DONE]`, and a `finish_reason` marker, forwarding only
+  `{ type: "delta", text }` to the reply service. A malformed chunk, explicit
+  upstream error frame, `finish_reason: "error"`, or interrupted stream is a
+  failure, never a finished answer. Aborting the request cancels the upstream read
+  even if the fetch runtime leaves a body pending. No provider payload reaches the
+  route or browser; the browser always sees the same `delta`, `done`, and `error`
+  events.
 - `reply.ts` builds history from the **stored** rows only: newest at most 40 turns
-  within 24,000 characters, mapping `USER` → `user` and `ASSISTANT` → `assistant`, with
-  no ids, positions, or invented system prompt. It then persists the reply with a
-  server-derived role, position, id, and timestamps. A transaction-level row lock plus
-  a "latest message unchanged" check means a second concurrent request is refused
-  (`400`) rather than storing a duplicate reply, and the
-  `(conversationId, position)` unique constraint stays intact.
+  within 24,000 characters, mapping `USER` → `user` and `ASSISTANT` → `assistant`,
+  never accepting a stored `SYSTEM` row as an instruction. It prepends one trusted
+  personality `system` message (below) for both JSON and streaming requests, with no
+  ids or positions. It then persists only the assistant's finished reply with a
+  server-derived role, position, id, and timestamps — never the instruction. A
+  transaction-level row lock plus a "latest message unchanged" check means a second
+  concurrent request is refused (`400`) rather than storing a duplicate reply, and
+  the `(conversationId, position)` unique constraint stays intact.
+- `src/server/ai/pet-context.ts` is the **companion context contract**: the only
+  information about the user's pet that the AI layer may hold. It is a projection, not
+  a passthrough — a catalog pet `id` and `name`, plus a personality `id`, `name`, the
+  closed trait vocabulary, and the two optional behavior hints. Deliberately absent:
+  the appearance and its palette, the `asset`, `species`, and every catalog
+  `description`; raw catalog objects; the `user_preferences` row and `uiPreferences`;
+  any account field (user id, email, session, conversation); and any credential,
+  environment value, or provider identifier. `resolveAiPetContext(user)` takes the
+  session user and nothing else — there is no parameter a request could smuggle a pet
+  or personality through, and the reply endpoint already refuses every body field — and
+  resolves both values through the existing pet preference service and catalog, so
+  there is no second source of truth. A missing, unknown, retired, unavailable,
+  malformed, or *incompatible* selection (a personality some other pet offers) degrades
+  to the documented defaults, and the personality returned always belongs to the pet it
+  is returned with. It reads only the caller's own row, writes nothing — a stale pair is
+  resolved, never repaired in passing — and never throws: a companion is context, not a
+  requirement, so a failed preference read degrades to the catalog default instead of
+  failing a reply. `prepareReply` resolves it beside the history and model key and
+  carries it on the prepared reply for both paths. `src/server/ai/pet-instruction.ts`
+  accepts only that shape, checks the pet/personality pair against the same catalog,
+  and translates its trusted trait tags and motion hint into a short, deterministic
+  **style** instruction. No context name, raw catalog object, visual resting state,
+  appearance, account data, preference record, or API key enters the instruction.
+  The assistant is told to keep tasks accurate, useful, and subject to higher-priority
+  and safety instructions; no catchphrase, personality label, or claim to be an animal
+  is required. The reply service places this one system message before stored history,
+  once per generation before streaming starts. Both adapters still receive only plain
+  messages and a catalog model key; neither knows about pets, preferences, or AI style
+  rules. Pet changes during a stream cannot change that stream's prepared instruction.
+
+The current catalog produces four distinct but task-first tones from the **existing**
+traits and motion hints, not a second personality catalog:
+
+| Personality | Assistant style |
+| ----------- | --------------- |
+| Calm | Gentle, composed, clear, supportive without unnecessary excitement |
+| Playful | Warm and upbeat; occasional harmless playfulness, never a running joke |
+| Curious | Interested and exploratory; useful connections or a relevant follow-up, never invented facts |
+| Sleepy | Relaxed and low-energy while still answering fully and clearly |
+
+The visual `restingState` hint remains exclusively with the deterministic reaction
+engine. The assistant is not instructed to imitate an animal or to mention the pet's
+name. Changing the account's selection affects future generations, not stored messages
+or a stream already underway.
 
 The SSE protocol is small and documented in `src/features/conversations/types.ts`:
 
@@ -369,28 +438,39 @@ turn.
 
 The models a reply can use are owned by the server, in code:
 `src/server/ai/models/catalog.ts`. It is a short, explicit list — nothing is fetched
-from OpenRouter, and the app boots (and builds) without a database or a key. Each
-entry is:
+from either provider, and the app boots (and builds, once Prisma is generated)
+without a model-API round trip or provider key. Each entry names a stable internal
+key, a provider, that provider's documented identifier, a display name, and active
+metadata:
 
-| Catalog key         | OpenRouter identifier               | Shown as          | State    |
-| ------------------- | ----------------------------------- | ----------------- | -------- |
-| `gpt-4o-mini`       | `openai/gpt-4o-mini`                | GPT-4o mini       | active (**default**) |
-| `gpt-4o`            | `openai/gpt-4o`                     | GPT-4o            | active   |
-| `claude-3.5-haiku`  | `anthropic/claude-3.5-haiku`        | Claude 3.5 Haiku  | active   |
-| `claude-3.7-sonnet` | `anthropic/claude-3.7-sonnet`       | Claude 3.7 Sonnet | active   |
-| `llama-3.1-70b`     | `meta-llama/llama-3.1-70b-instruct` | Llama 3.1 70B     | retired  |
+| Catalog key              | Provider   | Provider identifier                 | Shown as          | State                |
+| ------------------------ | ---------- | ----------------------------------- | ----------------- | -------------------- |
+| `gpt-4o-mini`            | OpenRouter | `openai/gpt-4o-mini`                | GPT-4o mini       | active (**default**) |
+| `gpt-4o`                 | OpenRouter | `openai/gpt-4o`                     | GPT-4o            | active               |
+| `claude-3.5-haiku`       | OpenRouter | `anthropic/claude-3.5-haiku`        | Claude 3.5 Haiku  | active               |
+| `claude-3.7-sonnet`      | OpenRouter | `anthropic/claude-3.7-sonnet`       | Claude 3.7 Sonnet | active               |
+| `llama-3.1-70b`          | OpenRouter | `meta-llama/llama-3.1-70b-instruct` | Llama 3.1 70B     | retired              |
+| `nvidia-llama-3.3-70b`   | NVIDIA NIM | `meta/llama-3.3-70b-instruct`      | Llama 3.3 70B    | active               |
 
 The **catalog key is the only model name the browser ever sees or sends**. The
-OpenRouter identifier is resolved on the server, from this list, immediately before
-the provider is called; an unknown, retired, empty, or raw-identifier value is
-refused before any request is made. A retired entry stays in the list (and in the
-database, see below) but is never offered, never selectable, and never used.
+provider and its identifier are resolved on the server from this list immediately
+before generation; an unknown, retired, empty, or raw-identifier value is refused
+before any request is made. A retired entry stays in the list (and in the database,
+see below) but is never offered, never selectable, and never used. The first five
+entries retain their previous provider and catalog order. NVIDIA's
+[`meta/llama-3.3-70b-instruct` model](https://docs.api.nvidia.com/nim/reference/meta-llama-3_3-70b-instruct-infer)
+is the initial verified NVIDIA-hosted entry; different NVIDIA models may accept
+different parameters, so expanding this list is a reviewed code-and-seed change,
+not a browser-supplied string.
 
 **Default model, in this order of precedence:**
 
 1. The signed-in account's stored preference, if it names an active catalog model.
-2. `OPENROUTER_MODEL`, if it matches an active catalog entry — by OpenRouter
-   identifier (`openai/gpt-4o`) or by catalog key (`gpt-4o`).
+2. `OPENROUTER_MODEL`, the existing deployment-default variable, if it matches an
+   active catalog entry — by provider identifier (`openai/gpt-4o` or the cataloged
+   NVIDIA identifier) or catalog key (`gpt-4o` or `nvidia-llama-3.3-70b`). This
+   legacy name is retained to avoid breaking deployments; explicitly setting it
+   to a NVIDIA entry is the only way to change the deployment default to NVIDIA.
 3. The catalog default, `gpt-4o-mini`.
 
 A preference that no longer resolves (a model retired since it was chosen) is treated
@@ -398,6 +478,21 @@ as no preference: the reply uses the next step in that list, and the fallback is
 logged once without a credential. `OPENROUTER_MODEL` likewise never invents a model:
 a value outside the catalog is ignored with a one-time warning, so a deployment
 cannot point the app at an "available" model that the selector cannot show.
+
+**Example NVIDIA default.** Leave `OPENROUTER_MODEL` unset to keep OpenRouter's
+`gpt-4o-mini` as the default. To explicitly select NVIDIA for accounts with no
+stored preference, set the following server-side variables (supply actual API keys
+through a secret manager, not a committed file):
+
+```text
+OPENROUTER_MODEL=nvidia-llama-3.3-70b
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+`NVIDIA_API_KEYS` is required at reply time for that selection, as a comma-separated
+list. An account can also select the NVIDIA catalog key through the existing model
+selector without changing the default for anyone else. OpenRouter replies never
+need `NVIDIA_API_KEYS`, and NVIDIA replies never use `OPENROUTER_API_KEYS`.
 
 **Preference API.** `GET /api/models` returns the active models (key, name, short
 description) and `selectedModelKey`; `PUT /api/models` accepts exactly
@@ -407,32 +502,44 @@ request cannot name, read, or write another account's preference. `PUT` also req
 the same trusted-origin check as every other write. Malformed JSON, an oversized
 body, a missing or non-string key, an unexpected field, an unknown key, and a retired
 model are all `400` with the standard `{ error: { code, message } }` envelope;
-unauthenticated is `401`, an untrusted origin is `403`. The OpenRouter identifier,
-the provider, the key pool's state, and the rest of the environment configuration are
-never serialized. `src/server/ai/models/request.ts` holds the strict body parsing and
+unauthenticated is `401`, an untrusted origin is `403`. No raw provider identifier,
+provider field, credential, key-pool state, or environment configuration is
+serialized. `src/server/ai/models/request.ts` holds the strict body parsing and
 `src/server/ai/models/view.ts` the read model the chat header renders; both are
 server-only.
 
 **Storage.** The preference is the existing `user_preferences.preferredModelId`
 column, which already references `ai_models` with `onDelete: SetNull`. The migration
-`prisma/migrations/20260923020000_seed_ai_models` inserts one `ai_models` row per
-catalog entry (id = catalog key, provider `OPENROUTER`, the identifier, the display
-name, and the active flag; re-runnable via `ON CONFLICT (id) DO UPDATE`). Seeding is
-therefore a migration, not a runtime requirement: every catalog key always has a row
-to reference, and nothing in the app reads the table to decide what to offer — that
-is what keeps booting without a live database possible. If the rows are missing (a
-deployment that skipped the migration), storing a preference answers a controlled
-`400` and logs the seed migration's name; replies continue to work.
+`prisma/migrations/20260923020000_seed_ai_models` inserts the five OpenRouter rows;
+`prisma/migrations/20260924000000_seed_nvidia_model` adds one NVIDIA row. Both use
+stable ids equal to catalog keys and idempotent `ON CONFLICT (id) DO UPDATE` inserts.
+The existing `ModelProvider` enum already includes NVIDIA: this second migration
+adds **data only** — no schema change, new table, enum value, index, or runtime
+catalog discovery. The row is required for the `preferredModelId` foreign key to
+accept the NVIDIA key; apply both seed migrations in deployments. The app does not
+read the table to decide what to offer. If a seed was skipped, storing that model's
+preference answers a controlled `400`; replies can still resolve catalog models.
 
-**From selection to OpenRouter.** The reply flow resolves the model once per turn:
-authenticate → `resolveReplyModelKey(userId)` (the precedence above) → carry that key
-on the prepared turn → the adapter resolves the identifier from the catalog and
-rejects anything else before a key is even selected. Both the JSON path and the SSE
-path use the same resolution, so a stream and a plain reply for the same turn cannot
-disagree. Key rotation is entirely independent of model choice: every catalog model
-uses the same `OPENROUTER_API_KEYS` pool, the same bounded `min(keys, 3)` attempts,
-the same cooldown, and the same rule that a stream never switches keys after the
-first delta.
+**From selection to provider.** The reply flow resolves the model once per turn:
+
+```text
+session user → stored catalog key (or default) → active catalog entry
+  → entry.provider → ReplyProvider adapter → entry.modelIdentifier
+```
+
+`resolveReplyModelKey(userId)` gets the key from that authenticated user's existing
+preference, falling back according to the precedence above. `prepareReply` carries
+it alongside the typed `petContext`; the shared message builder sends only the
+code-owned instruction derived from that context, never the context object. The
+provider dispatcher in `src/server/ai/providers/index.ts` maps the entry's provider
+to an adapter; the chosen adapter independently re-checks that the key is active and
+belongs to *that* provider before it touches its isolated key pool. The client
+cannot select a provider separately from the catalog entry. Both the JSON path and
+the SSE path use this resolution, so a stream and a plain reply for the same key
+cannot disagree. Key rotation is independent of model choice *within* each
+provider: OpenRouter models still share the same `OPENROUTER_API_KEYS` pool; NVIDIA
+models share only the `NVIDIA_API_KEYS` pool, with the same bounded attempt and
+cooldown semantics.
 
 **Chat history is not affected.** No table, column, or row records which model
 produced a reply — the change applies to future generations only. A stored
@@ -503,9 +610,9 @@ preference columns of the same row keep their values.
 appearance, and personality). Account editing, password or email changes, account
 deletion, billing, and usage tracking do not exist and are not stubbed. Pet
 *personalities* are catalog-defined behavior metadata: they are stored, displayed, and
-drive a small **local, deterministic** reaction engine. That engine now follows the real
-chat lifecycle, but it is not connected to OpenRouter and produces no AI behavior, no
-dialogue, and no system prompt (see the next section).
+drive a small **local, deterministic** reaction engine. That engine follows the real
+chat lifecycle and never calls an AI provider. The separate server-side builder reads
+the same metadata to influence generated reply style (see the next section).
 
 ## Pet framework
 
@@ -514,7 +621,8 @@ A small, reusable foundation for interactive 2D companions, kept entirely inside
 hold pet logic. It is deliberately a *framework*: types, catalog, state vocabulary, a
 renderer, lightweight CSS animations, a persisted per-account selection, appearance,
 and personality, and a deterministic local reaction engine that follows the chat
-lifecycle — no AI connection and no finished artwork.
+lifecycle — the visual framework itself makes no AI requests and has no finished
+artwork.
 
 - **Architecture.** `types.ts` declares the domain (`id`, `name`, `species`,
   `description`, `defaultPersonality`, `available`, an abstract `asset` reference, a
@@ -552,32 +660,51 @@ lifecycle — no AI connection and no finished artwork.
   one is catalog-defined with a stable `id` from a closed set (`calm`, `playful`,
   `curious`, `sleepy`), a display `name`, a one-line `description`, a few tags from a
   fixed trait vocabulary (`gentle`, `energetic`, `inquisitive`, `restful`, `sociable`,
-  `independent`), and optional tiny `hints` (`restingState`, `motionLevel`) for later
-  behavior tasks. No prompt text, no asset or URL, and nothing a client can supply.
+  `independent`), and optional tiny `hints` (`restingState`, `motionLevel`) that the
+  reaction engine reads as behavior metadata. No prompt text, no asset or URL, and
+  nothing a client can supply.
   Definitions live in one library in `catalog.ts` that pets reference, so a personality
   is written once; each pet offers a small subset and declares exactly one default
   (Yori: calm/sleepy/curious, Ember: curious/playful, Pip: playful/sleepy but never
   selectable). `isSelectablePersonality` allows an id only for an available pet that
   lists it, and `resolvePersonalityForPet` maps a missing, unknown, or other-pet id
-  back to that pet's default. Personalities now drive the local reaction engine below;
-  they still produce no AI behavior, no dialogue, and no system prompt.
+  back to that pet's default. Personalities drive the local reaction engine below
+  through exactly that metadata — the trait tags and the two hints — which is what makes
+  the four of them observably different on the same event. The server also interprets
+  the traits and motion hint into an AI style instruction for *future* replies; no raw
+  personality definition or visual reaction is forwarded or persisted as a prompt.
 - **Behavior & reactions.** `reactions.ts` is a pure engine: it takes a pet, a
   personality, an application event, and the current state, and returns one of the six
   **existing** states plus an optional settle duration. No React, no timers, no network,
   no database, no AI — the same inputs always give the same output, which is what makes
   it testable with synthetic events. The vocabulary is deliberately small: `idle`,
   `user-started-message`, `thinking`, `response-started`, `response-completed`,
-  `response-error`, `cancelled`, `successful-action`. Only two personality rules exist,
-  both reading hints the catalog already declares — `motionLevel: "high"` turns a
-  positive reaction into `excited` where a calmer pet manages `happy`, and
-  `restingState: "sleeping"` keeps a drowsy pet dozing through `response-started`.
-  Where no existing state is an exact match the closest one is used and documented in
-  the mapping (`response-started` → `thinking`, since there is no "attentive" state).
+  `response-error`, `cancelled`, `successful-action`. Personality enters only as a
+  **temperament** read from the catalog definition — *expressive* (a `high` motion level
+  or the `energetic` trait), *sociable*, *inquisitive*, and a *resting* state — so no
+  personality id appears in the engine and a fifth personality would behave from its own
+  metadata with no code change. With the catalog as it stands that gives four
+  distinguishable companions (calm / playful / curious / sleepy): a new message is
+  `happy` / `excited` / `thinking` / `happy`, waiting for an answer is `thinking` /
+  `happy` / `thinking` / `sleeping`, a good outcome is `happy` / `excited` / `excited` /
+  `happy`, and a cancellation is `idle` / `idle` / `idle` / `sleeping`. Three things
+  deliberately do not vary, because varying them would misinform: `response-error` is
+  always `sad`, `thinking` always reports real processing, and a cancellation is never a
+  positive reaction. Where no existing state is an exact match the closest one is used
+  and documented in the mapping (`response-started` → `thinking` for a personality that
+  rests at attention, since there is no "attentive" state). All of it is local and
+  deterministic — no randomness, no timers inside the resolver, nothing persisted, and
+  no provider calls or prompt construction inside the visual reaction engine.
   `use-pet-behavior.ts` is the client-side controller that owns the only mutable parts:
   the current state, a **single** settle timer, and an unmount guard. State is derived
   rather than synced — a reaction is stored with the pet and personality that produced
-  it, so changing either settles the pet with no effect and no stale value. Nothing is
-  persisted: mood, temporary state, and reaction history never reach the database.
+  it, so changing either settles the pet with no effect and no stale value. The
+  "current state" the mapping reads is derived from that same record, never from a
+  second mirror, so a state left behind by one selection cannot be inherited by the
+  next (a dozing record from a sleepy personality cannot put a calm pet to sleep), and
+  the unmount guard covers the setters as well as the timer: a dispatch that outlives
+  its component writes nothing and schedules nothing. Nothing is persisted: mood,
+  temporary state, and reaction history never reach the database.
   `CHAT_PHASE_REACTIONS` maps the chat lifecycle onto the same vocabulary, so neither
   side grows a second event system.
 - **Chat reactions.** `features/chat/pet-reactions.ts` is the only bridge between the
@@ -593,6 +720,20 @@ lifecycle — no AI connection and no finished artwork.
   welcome mark, so a page carries exactly one accessible pet name — and it is not a live
   region, so reactions are seen and never announced. None of it is persisted, and none
   of it reaches a provider request, a prompt, or the database.
+- **Chat reaction lifecycle.** The shell keeps the generation it is reading in one ref:
+  the request's `AbortController` together with the reporter scoped to it, so the two
+  always end in the same step and a generation that is no longer current has no route
+  back to the pet or to the shell's state. A generation *replaced* by a newer one (a
+  retry, or a second submit that won the race) is sealed silently — the replacement
+  announces its own `thinking` and stays authoritative — while a generation *abandoned*
+  with nothing taking over (switching conversation, or leaving the page) reports
+  `cancelled`, so the companion settles instead of waiting forever for an answer that
+  will not arrive. Deltas and outcomes from a stream the shell has already dropped are
+  ignored, a message that finishes being stored after the user moved on does not start a
+  reply for a conversation that is no longer open, and every terminal path — success,
+  provider error, cancellation, navigation, replacement, unmount — leaves the pet either
+  settled or following the generation that is really in flight. No timer, retry rule, or
+  second reaction state was added to the chat component to achieve this.
 - **Renderer.** `<PetRenderer pet appearance personality state size className label />`
   renders any catalog pet at `sm`/`md`/`lg`, exposes one stable accessible name
   (`role="img"`, e.g. "Yori, a cat"), marks the drawing `aria-hidden`, and carries the
@@ -652,18 +793,38 @@ lifecycle — no AI connection and no finished artwork.
   a short note on failure — no spinner); reloading keeps all three. An anonymous visitor
   gets the full playground but the choices stay in the tab and never touch the database.
   A small **Reaction demo** dispatches the synthetic events (`User Message`,
-  `Start Thinking`, `Response Complete`, `Response Error`, `Cancel`) straight into the
-  local behavior engine so the personality mapping and the settle timing are visible;
-  mood and size stay manual controls. Both paths write nothing at runtime — mood,
-  temporary state, and reaction history are never persisted.
+  `Start Thinking`, `Response Started`, `Response Complete`, `Response Error`, `Cancel`)
+  straight into the local behavior engine so the personality mapping and the settle
+  timing are visible; `Response Started` is there beside `Start Thinking` because a wait
+  is where the personalities differ most, while processing looks the same on all of them.
+  Under the demo, one read-only line resolves the last event against **every** personality
+  the selected pet offers and marks the chosen one, so the differences can be compared
+  without switching back and forth — plain text, not a live region, and no new page or
+  dashboard. Mood and size stay manual controls. Both paths write nothing at runtime —
+  mood, temporary state, and reaction history are never persisted.
 - **Chat integration.** The empty-state companion beside the welcome mark is the
   signed-in user's stored pet, appearance, and personality (the catalog defaults for
   anonymous visitors), loaded server-side and passed down as props — the chat stores
-  nothing pet-related itself. The personality is carried as data only: it alters no
-  message, is never sent to OpenRouter, and is never turned into a system prompt. While
-  a conversation is open the same companion also appears in the header and reacts to the
-  real reply lifecycle; it is still connected to no model selection, sentiment, or
-  provider detail, and its runtime state is never stored.
+  nothing pet-related itself. While a conversation is open the same companion appears
+  in the header and reacts to the real reply lifecycle; that route loads the same
+  stored selection and personality keys, so the header pet and the empty-state pet
+  cannot disagree. Reply preparation resolves the companion separately on the server
+  for one compact AI style instruction, while the chat keeps using the deterministic
+  visual reaction engine. No client instruction construction, model-dependent pet
+  logic, sentiment engine, new states, or reaction persistence is introduced.
+- **AI context contract.** `src/server/ai/pet-context.ts` narrows the stored companion
+  to the only fields the AI layer may hold: pet `id` and `name`, personality `id`,
+  `name`, `traits`, and the two optional `hints`. It is resolved **server-side** from
+  the authenticated account's own preferences through the same service and catalog the
+  pages use, always as a compatible pet/personality pair, and it degrades to the
+  catalog defaults for a missing, unavailable, or stale selection. No appearance,
+  palette, description, preference row, account field, or credential is part of it, and
+  nothing a browser sent is read — the reply endpoint refuses every body field, and the
+  resolver has one parameter: the session user. The new instruction builder interprets
+  only its catalog-checked metadata into tone and task-first guidance; it does not
+  change the resolver or the reaction engine. Both provider request formats remain
+  `{ model, messages, stream }`, now with one server-generated `system` message ahead
+  of the same stored conversation turns.
 
 ## Architecture
 
@@ -692,11 +853,13 @@ src/
 │   ├── db/                # Lazy server-only Prisma client boundary
 │   ├── email/             # Server-only SMTP adapter for auth links
 │   └── ai/                # Server-only reply provider boundary
-│       ├── providers/     # OpenRouter adapter: request + stream parsing (no SDK)
-│       ├── key-pool/      # Round-robin key selection, cooldowns, bounded rotation
-│       └── models/        # Server-owned catalog, preference service, read model
+│       ├── providers/     # Catalog dispatcher, OpenRouter + NVIDIA NIM adapters
+│       ├── key-pool/      # Provider-scoped round-robin rotation and cooldowns
+│       ├── models/        # Server-owned provider/model catalog and preferences
+│       ├── pet-context.ts # Narrowed, resolved companion contract
+│       └── pet-instruction.ts # Shared, server-only AI style instruction builder
 └── lib/                   # Reserved for shared, non-secret utilities
-prisma/                    # PostgreSQL schema and initial migration
+prisma/                    # PostgreSQL schema and model seed migrations
 tests/                    # Vitest unit tests and Playwright browser checks
 ```
 
@@ -726,11 +889,24 @@ assets or external font requests are used.
 
 ## Verification and tooling limitations
 
-The project passes `npm install`, lint, typecheck, **452 unit tests**, **72 Chromium
-browser tests**, and production build/start without real secrets, SMTP credentials,
-or a live database after client generation. **87 database checks** (13 streaming reply
+**Task 24 verification in this restricted sandbox (2026-09-24):** `npm ci`,
+`npm run lint`, and — after generating the ignored Prisma client with a *temporary*
+config using Prisma's bundled WASM schema engine — `npm test` (704/704),
+`npm run typecheck`, and `npm run build` pass. The unchanged native
+`npm run db:generate` still fails downloading its engine checksum due to a TLS
+disconnect. Before the temporary generation, `npm test` reproduced the eight known
+Prisma-stub failures (678/686 passed), and typecheck/build showed the same 31
+Prisma-client errors. The WASM config was removed after generation; no schema,
+dependency, or runtime configuration was changed. A mocked route-to-provider-to-SSE
+smoke test passes for OpenRouter rotation/failure and NVIDIA JSON, but no live provider
+was called. `DATABASE_TEST_URL` is unset; Playwright lists 81 tests but no browser
+executable is available, so neither DB integration nor Playwright was run for Task 24.
+
+The following database and browser coverage was verified during earlier steps in an
+environment where the Prisma client and disposable PostgreSQL were available, not
+re-executed for Task 23 in this sandbox: **87 database checks** (13 streaming reply
 + 16 reply + 9 message + 13 conversation + 9 settings + 6 pets + 9 model preference + 9 auth + 3 structure)
-pass against disposable PostgreSQL 17.6,
+against disposable PostgreSQL 17.6,
 including registration, duplicate-email rejection, session creation, expired
 verification tokens, single-use password reset, the conversation ownership matrix
 (owner-scoped list order, foreign/unknown ids answering the same 404, and deletion
@@ -785,13 +961,31 @@ renderer's accessible label, size variants, `data-state`/`data-motion` attribute
 labelled placeholder for an unavailable or malformed pet, plus the pet preference
 service's default/invalid/unavailable/per-user resolution, the `/api/settings/pet`
 route's auth, origin, and strict-body handling, and the selection client's payload and
-error mapping), and the local reaction engine (every event's deterministic mapping,
-repeated calls returning identical results, the personality-driven differences and the
-events that stay identical on purpose, missing and invalid pet/personality input falling
-back without throwing, `idle` holding, an error reaction never being positive, a
-cancelled reaction staying safe, the chat-phase seam, and the behavior
+error mapping), and the local reaction engine (every event's deterministic mapping for
+every personality the catalog offers, repeated calls returning identical results, each
+pair of personalities differing on the *intended* events rather than merely on some
+event, while a failure, real processing, and an explicit settle stay identical for all
+of them, the temperament rules re-derived from the catalog metadata instead of restated
+as per-personality expectations, a cancellation never turning positive for any
+personality or current state, missing, invalid, and other-pet pet/personality input
+falling back without throwing, `idle` holding, an error reaction never being positive,
+the resolver scheduling no timer and consulting no clock, no randomness, and nothing
+outside its arguments, the chat-phase seam, and the behavior
 controller's dispatch, settle-to-idle, reset, per-pet and per-personality resolution
-with no stale reaction, and a settle timer that cannot fire after unmount), and the
+with no stale reaction, and a settle timer that cannot fire after unmount), the AI
+companion-context contract (the exact fields it narrows two catalog definitions to and
+the ones it refuses — appearance, palette, species, descriptions, preference rows,
+account fields, credentials — plus a guard that rejects every wider shape, server-side
+resolution of a stored, missing, unavailable, malformed, and cross-pet selection, the
+invariant that the personality always belongs to the pet it is returned with across
+every stored combination the catalog can produce, one account's companion never
+appearing in another's, an anonymous caller resolving to the catalog default with no
+row read at all, a smuggled pet, personality, or credential changing nothing, no write
+while building context, and a failed preference read degrading instead of throwing),
+the reply flow resolving that context beside the history and model key while the
+serialized provider body still carries only a model, turns, and the stream flag, the
+reply endpoint still refusing a body that claims a pet or personality, and the provider
+adapter's own source importing nothing pet- or database-related), and the
 chat integration (each lifecycle moment producing its documented event, a reporter
 reusing the existing phase mapping and emitting nothing outside the vocabulary, the
 first-content event reported once for many deltas, a completed, failed, or cancelled
@@ -802,7 +996,33 @@ is genuinely issued, the first delta reaching the renderer, a completed stream
 celebrating and settling, an error showing `sad`, a cancellation settling rather than
 sulking (and a dozing companion staying asleep through it, per the engine's documented
 rule), a refused message reporting nothing at all, a personality change mid-generation
-carrying no stale reaction, and the composer's own error display left intact. The browser suite drives the selector end to end: the catalog it
+carrying no stale reaction, and the composer's own error display left intact. The
+lifecycle edge cases are covered against that same real shell: two overlapping
+generations (a retry clicked twice before React re-renders) with the replaced request
+provably aborted, its late deltas kept out of the reply on screen, and its late success
+or failure changing neither the companion nor the stored thread; a retry after a
+provider error getting a clean `thinking → response-started → completed` sequence of its
+own with nothing inherited from the failure; cancellation, and a completion or an error
+arriving after it; switching conversation mid-generation, which settles the companion
+instead of leaving it thinking, keeps the abandoned stream's success and failure out of
+the next conversation, and leaves that conversation fully usable with a fresh
+lifecycle; a message that finishes being stored after the user left, which never starts
+a reply for a thread that is not open; unmounting mid-generation, which aborts the
+request and schedules no timer afterwards; pet and personality changes before, during,
+and after a reaction, including a settle timer left pending by the previous selection;
+and the header companion itself — drawn exactly once for an open conversation, absent
+from the welcome state, never duplicated by streaming or a route change, keeping one
+accessible name, no live region, the same element and footprint across reactions, and a
+pose for every reaction so nothing depends on motion. The behavior controller is
+additionally checked for the two things only a real mount can show: that a state left by
+one pet or personality is never read as the next one's current state, and that its
+dispatch, hold, and reset are ignored once it is gone. The playground is mounted in
+jsdom for the same reason, so the reaction demo is covered where it can actually run: a
+dispatched event reaching the renderer and the note, the read-only comparison listing
+exactly the personalities the selected pet offers with the chosen one marked, that
+listing staying readable after a temporary reaction settles and giving way to the manual
+state controls, no live region anywhere on the page, and an anonymous visitor's choices
+and reactions performing no `fetch` at all. The browser suite drives the selector end to end: the catalog it
 lists, a stored choice surviving a reload and a second conversation, the identifier
 the stub receives for the default and for two other selections (including a streamed
 rotation), two accounts keeping separate choices, and a raw provider identifier
@@ -818,15 +1038,29 @@ operation of the controls, reduced motion removing the movement while the pose
 remains, a signed-in user's choice persisting across a reload, an anonymous choice
 staying local and never reaching the database, the reaction demo changing the pose for
 each synthetic event and settling back to idle while a high-motion personality reacts
-more strongly than a calm one, that demo working from the keyboard and under reduced
+more strongly than a calm one, the demo's read-only comparison line resolving that same
+event for every personality the selected pet offers and marking the chosen one without
+announcing anything, that demo working from the keyboard and under reduced
 motion, and the chat empty-state companion
-following the stored pet without breaking a narrow layout.
-No AI check reaches the network: the provider contract is covered by unit tests with a
-mocked `fetch`, the reply service and database suites mock the adapter module, and the
-browser suite talks to a local stub (`tests/e2e/mock-openrouter.mjs`) wired in through
-`OPENROUTER_BASE_URL`, which streams deterministic deltas. No real key is required in
-CI or locally. See the database documentation for the code-generation network
-limitation.
+following the stored pet without breaking a narrow layout. Against the real streaming
+stub it also drives the header companion: following the live reply phases and settling
+back to idle, being drawn exactly once for an open conversation and not at all in the
+welcome state (with one accessible name, no live region, and no sideways overflow at
+375px), a retried reply getting a clean reaction lifecycle of its own after a stream
+that died mid-answer, and leaving a conversation mid-generation settling the companion
+instead of leaving it thinking about a reply that will never arrive.
+No ordinary AI test reaches a live provider: both adapter contracts have unit
+coverage with a mocked `fetch`; route and reply-service tests mock the two adapters;
+and existing browser tests target a local OpenRouter stub
+(`tests/e2e/mock-openrouter.mjs`) wired through `OPENROUTER_BASE_URL`. NVIDIA route
+unit tests exercise the unchanged `delta`/`done`/`error` SSE wire format, a failed
+partial answer that writes no row, and a client-supplied provider or model that never
+reaches an adapter. NVIDIA provider tests cover the exact endpoint and body,
+`[DONE]`, fragmented SSE, malformed and upstream error frames, timeouts, aborts,
+network and HTTP failures, round-robin/quarantine/retry rules, no key switch after
+first delta, and isolation from the OpenRouter key pool even for identical test key
+strings. No real key is required in CI or locally; live NVIDIA output has not been
+verified. See the database documentation for the code-generation limitation.
 Browser layout checks cover 320, 375, 768, 1024, and 1440px widths, plus a 320×540
 viewport with a long draft, and every auth page at 375px and 1440px. An automated
 accessibility audit found no WCAG A/AA violations in the empty, static-conversation,
@@ -854,22 +1088,32 @@ acceptance testing; those remain future verification work.
   generation succeeded via a temporary WASM config, and migration SQL was accepted
   by PostgreSQL. Prisma-managed deployment/history remains unverified. See
   [the database verification report](docs/database.md#what-was-actually-verified-in-this-sandbox).
-- Streaming replies were verified against a real browser and the local stub
+- **Task 24 did not run the browser or database suites.** The native Prisma CLI
+  still cannot download its schema engine; the temporary WASM generation described
+  above enabled a passing production build but did not provide a disposable
+  PostgreSQL database or a Chromium executable. `npx playwright test --list` finds
+  81 browser tests, not proof that they execute. A migrated `DATABASE_TEST_URL` is
+  required for the signed-in checks; the public-page checks also need Chromium.
+  The mocked in-process smoke and jsdom lifecycle suites run without either.
+- Earlier development verified streaming in a real browser against the local stub
   (incremental delivery measured end to end, several deltas rendered before the
-  stored row arrived), but never against the real OpenRouter service: the sandbox
-  holds no credentials, so live model output, provider-side rate limits, and any
-  provider-specific framing outside the documented OpenAI-compatible shape remain
-  unexercised. Key rotation is covered by unit tests with a mocked `fetch` and by a
-  browser test against the local stub (which refuses one attempt so the fallback key is
-  observable on the wire), but a real OpenRouter rate limit or revoked key was never
+  stored row arrived); that browser test was not rerun for Task 24. No real OpenRouter
+  service was called: the sandbox holds no credentials, so live model output,
+  provider-side rate limits, and any provider-specific framing outside the documented
+  OpenAI-compatible shape remain unexercised. Key rotation is covered by unit tests
+  with a mocked `fetch`, a mocked Task 24 end-to-end smoke, and a browser test written
+  for the local stub (which refuses one attempt so the fallback key is observable on
+  the wire), but a real OpenRouter rate limit or revoked key was never
   seen here, so the exact cooldown that suits live provider limits may need tuning;
   provider-side `Retry-After` is deliberately not read. The model catalog is a
   server-owned **code** list, so adding a model is a code change plus one seed row —
   there is no admin UI, no provider-side model discovery, and no per-model settings
   (limits, pricing, or capability flags); `llama-3.1-70b` exists only to prove a
-  retired entry is never offered. NVIDIA support is still **not** implemented, and
-  there is no resume/reconnect: a dropped stream is retried by asking for a new
-  generation, not by continuing the old one.
+  retired entry is never offered. NVIDIA NIM is integrated through the same
+  catalog and reply flow, but no live NVIDIA request was made in this sandbox, so
+  provider-side behavior outside the documented OpenAI-compatible contract remains
+  unexercised. There is no resume/reconnect: a dropped stream is retried by asking
+  for a new generation, not by continuing the old one.
 
 ## License
 

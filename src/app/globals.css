@@ -2225,6 +2225,26 @@ svg {
   font-size: 12px;
   color: var(--muted);
 }
+/* The demo's cross-personality comparison: the same event resolved for every
+   personality the selected pet offers. Wraps rather than overflowing, and keeps the
+   same quiet styling as the note — it is a comparison, not a control. */
+.pets-reaction-compare {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.pets-reaction-compare-label {
+  font-weight: 600;
+  color: var(--text-body);
+}
+.pets-reaction-compare-item[aria-current="true"] {
+  font-weight: 600;
+  color: var(--foreground);
+}
 .pets-controls {
   display: grid;
   gap: 16px;

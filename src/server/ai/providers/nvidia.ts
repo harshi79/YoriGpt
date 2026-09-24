@@ -2,7 +2,11 @@ import "server-only";
 import { getServerEnv } from "../../env";
 import { AiNotConfiguredError, AiProviderError } from "../errors";
 import { getKeyPool, type KeyPool } from "../key-pool";
-import { defaultModelKey, resolveCatalogIdentifier } from "../models/catalog";
+import {
+  defaultModelKey,
+  resolveCatalogIdentifier,
+  type ModelProviderName,
+} from "../models/catalog";
 import type {
   ChatTurn,
   GenerateReplyOptions,
@@ -12,22 +16,34 @@ import type {
 } from "../types";
 
 /**
- * The incumbent AI provider. It speaks OpenRouter's OpenAI-compatible
- * chat-completions API over the plain `fetch` of the server runtime — no SDK, no
- * key in the browser. Everything provider-specific lives in this file: the request
- * shape, the server-sent-event framing of a streaming answer, `[DONE]` handling,
- * the translation of every failure into `AiProviderError`, and the bounded key
- * rotation that retries a request with another configured key. The reply service,
- * the routes, and the browser only ever see plain assistant text.
+ * The NVIDIA adapter: NVIDIA NIM's hosted inference API, which speaks the same
+ * OpenAI-compatible chat-completions dialect as OpenRouter but is a different
+ * service with different credentials, different rate limits, and no OpenRouter
+ * attribution header.
+ *
+ * Everything NVIDIA-specific lives in this file — the endpoint, the request shape,
+ * the server-sent-event framing of a streaming answer, `[DONE]` handling, the
+ * translation of every failure into `AiProviderError`, and the bounded key rotation
+ * that retries a request with another configured key. The reply service, the routes,
+ * and the browser see exactly what they see from OpenRouter: plain assistant text.
+ *
+ * The adapter is deliberately self-contained rather than a shared base class with
+ * the OpenRouter one. Both speak an OpenAI-compatible dialect today, but the two
+ * services differ in the details that matter for reliability (headers, latency,
+ * error vocabulary, non-standard chunk fields such as `reasoning`), and a shared
+ * core would force the incumbent provider to change shape the moment NVIDIA needs
+ * something of its own. What is shared instead is the *contract*: the same
+ * `ReplyProvider` surface, the same failure reasons, the same key-pool semantics,
+ * and the same "no mid-answer key switch, no partial row" guarantees.
  *
  * Which model to ask for is not decided here either: the caller passes a key from
- * the server-owned catalog, this adapter resolves it to the OpenRouter identifier,
- * and a key that is unknown or retired is refused before any request is made. Model
- * choice and key rotation are independent — every model uses the same key pool.
+ * the server-owned catalog, this adapter resolves it to the NVIDIA identifier, and
+ * a key that is unknown, retired, or served by another provider is refused before
+ * any request is made.
  */
 
 /** A stalled provider must not hold a request open forever, streaming or not. */
-export const OPENROUTER_TIMEOUT_MS = 30_000;
+export const NVIDIA_TIMEOUT_MS = 30_000;
 
 /** Requests are small, but a runaway provider response is still bounded. */
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -40,17 +56,26 @@ const MAX_STREAM_BYTES = 1_000_000;
  * accumulated text passes this, so an endless provider stream cannot fill server
  * memory, the SSE connection, or a database row.
  */
-export const OPENROUTER_MAX_REPLY_CHARACTERS = 16_000;
+export const NVIDIA_MAX_REPLY_CHARACTERS = 16_000;
 
 /** Marks the end of an OpenAI-compatible stream. */
 const STREAM_DONE = "[DONE]";
 
 /**
  * How many keys one generation request may try. The real bound is the smaller of
- * this and the number of configured keys, so a request can never become an
+ * this and the number of configured NVIDIA keys, so a request can never become an
  * unbounded retry loop and never hammers one key.
  */
-export const MAX_KEY_ATTEMPTS = 3;
+export const NVIDIA_MAX_KEY_ATTEMPTS = 3;
+
+/**
+ * This adapter's place in the catalog, used for two things that must agree: which
+ * catalog entries it may resolve an identifier for, and which scope its keys rotate
+ * in. Scoping the pool by provider means a key NVIDIA rejected never cools down an
+ * OpenRouter key — the two providers share no credentials, rate limits, or failure
+ * history.
+ */
+const PROVIDER: ModelProviderName = "nvidia";
 
 type ProviderConfig = {
   /** Configured keys, in order; the pool decides which one a request uses. */
@@ -60,14 +85,18 @@ type ProviderConfig = {
 
 /**
  * Reads the server-only configuration. A missing or invalid value throws
- * `AiNotConfiguredError` so the endpoint can answer with a controlled error
- * instead of failing the build or leaking validation details to the browser.
- * `OPENROUTER_API_KEYS` holds one or more keys; the pool rotates through them.
+ * `AiNotConfiguredError` so the endpoint can answer with a controlled error instead
+ * of failing the build or leaking validation details to the browser.
+ * `NVIDIA_API_KEYS` holds one or more keys; the pool rotates through them.
+ *
+ * Nothing here is read at module scope, so importing this adapter — which the
+ * dispatcher always does — never requires NVIDIA credentials, and an OpenRouter-only
+ * deployment boots and answers without them.
  */
 function readConfig(): ProviderConfig {
   try {
-    const { OPENROUTER_API_KEYS, OPENROUTER_BASE_URL } = getServerEnv("openrouter");
-    return { keys: OPENROUTER_API_KEYS, baseUrl: OPENROUTER_BASE_URL };
+    const { NVIDIA_API_KEYS, NVIDIA_BASE_URL } = getServerEnv("nvidia");
+    return { keys: NVIDIA_API_KEYS, baseUrl: NVIDIA_BASE_URL };
   } catch (error) {
     throw new AiNotConfiguredError(error);
   }
@@ -78,17 +107,23 @@ function chatCompletionsUrl(baseUrl: string): string {
 }
 
 /**
- * The OpenRouter identifier one call will use. Only a catalog key is accepted from
- * the caller — the identifier itself is produced by the catalog module — so no
- * browser value and no stray string can name a provider model. Resolved once per
- * call, before any key is selected, so an unusable model fails immediately instead
- * of looking like a retryable provider fault.
+ * The NVIDIA identifier one call will use. Only a catalog key is accepted from the
+ * caller — the identifier itself is produced by the catalog module, for the
+ * `nvidia` provider only — so no browser value, no stray string, and no model of
+ * another provider can name a NVIDIA model. Resolved once per call, before any key
+ * is selected, so an unusable model fails immediately instead of looking like a
+ * retryable provider fault.
  */
 function modelIdentifier(model: string | undefined): string {
-  return resolveCatalogIdentifier(model ?? defaultModelKey());
+  return resolveCatalogIdentifier(model ?? defaultModelKey(), PROVIDER);
 }
 
-/** Builds the one request body both paths use; only `stream` differs. */
+/**
+ * Builds the one request body both paths use; only `stream` differs. Just the three
+ * fields NVIDIA documents for this endpoint: the model, the turns, and the flag.
+ * Nothing internal travels with them — no database columns, no companion or
+ * personality data, and no sampling parameters this application does not set.
+ */
 function requestBody(model: string, turns: readonly ChatTurn[], stream: boolean) {
   return {
     model,
@@ -105,7 +140,7 @@ type Signals = {
 };
 
 function requestSignals(options: GenerateReplyOptions): Signals {
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? OPENROUTER_TIMEOUT_MS);
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? NVIDIA_TIMEOUT_MS);
   return {
     timeout,
     request: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
@@ -118,9 +153,9 @@ function requestSignals(options: GenerateReplyOptions): Signals {
  * cancellation. A caller abort is then recognised from the signal as well as from
  * the error, because a cancelled body read surfaces as a plain stream failure
  * (`TypeError: terminated`) rather than an `AbortError` — a browser navigating away
- * must not be filed as a provider network fault. Only the outcome is retained:
- * fetch/body-read errors can echo credentials or prompt text and must not become
- * an enumerable provider-error cause.
+ * must not be filed as a provider network fault. Nothing but the outcome is
+ * inspected or retained: no message text, no body, and no untrusted `cause`
+ * that could later leak through logging or serialization.
  */
 function mapFetchFailure(error: unknown, signals: Signals): AiProviderError {
   if (signals.timeout.aborted) return new AiProviderError("timeout");
@@ -152,7 +187,6 @@ async function postChatCompletions(
         authorization: `Bearer ${key}`,
         "content-type": "application/json",
         accept: stream ? "text/event-stream" : "application/json",
-        "x-title": "YoriGPT",
       },
       body: JSON.stringify(requestBody(model, turns, stream)),
       signal: signals.request,
@@ -160,8 +194,8 @@ async function postChatCompletions(
   } catch (error) {
     throw mapFetchFailure(error, signals);
   }
-  // A gateway may return a response even after cancellation. Do not accept it or
-  // turn its status into a key-specific retry.
+  // A gateway or test double may return a response despite a canceled signal.
+  // Never accept it (or turn its HTTP status into a key-specific retry).
   if (signals.request.aborted) {
     void response.body?.cancel().catch(() => {});
     throw mapFetchFailure(signals.request.reason, signals);
@@ -172,9 +206,10 @@ async function postChatCompletions(
 /** A non-2xx answer is reported by status only; the body may echo provider input. */
 function assertOk(response: Response, label: string) {
   if (response.ok) return;
-  console.error(`[openrouter] ${label} request failed with status ${response.status}.`);
-  // The body is never read — it can echo the request — but it is released so a
-  // rejected attempt does not leave a socket open while another key is tried.
+  console.error(`[nvidia] ${label} request failed with status ${response.status}.`);
+  // The body is never read — it can echo the request, and NVIDIA error bodies can
+  // name the credential's account — but it is released so a rejected attempt does
+  // not leave a socket open while another key is tried.
   void response.body?.cancel().catch(() => {});
   throw new AiProviderError("http-error", { status: response.status });
 }
@@ -184,13 +219,15 @@ function assertOk(response: Response, label: string) {
  * another key, and only one of them is the key's own fault:
  *
  * - `quarantine`: the provider rejected *this key* — invalid or revoked (401, 403)
- *   or rate limited (429). The key is skipped until its cooldown expires and
- *   another key is tried.
- * - `rotate`: the failure is not key-specific — a provider-side error (5xx) or a
- *   network fault. Another key may still answer, but this one stays eligible.
+ *   or rate limited (429), which is how NVIDIA's free tier reports an exhausted
+ *   quota. The key is skipped until its cooldown expires and another key is tried.
+ * - `rotate`: the failure is not key-specific — a provider-side error (5xx, which
+ *   includes the 504s a busy NIM endpoint returns) or a network fault. Another key
+ *   may still answer, but this one stays eligible.
  * - `none`: another key cannot help. A malformed, empty, or oversized answer, a
- *   request the provider refused as invalid (other 4xx), a deadline that already
- *   consumed the request, or a caller that cancelled are all reported as they are.
+ *   request the provider refused as invalid (other 4xx, such as the 404 an unknown
+ *   model identifier earns), a deadline that already consumed the request, or a
+ *   caller that cancelled are all reported as they are.
  */
 type FailureAction = "quarantine" | "rotate" | "none";
 
@@ -204,28 +241,31 @@ function failureAction(error: AiProviderError): FailureAction {
 
 /** Every attempt ends here, so both reply paths classify failures identically. */
 function asProviderFailure(error: unknown): AiProviderError {
-  return error instanceof AiProviderError
-    ? error
-    : new AiProviderError("network-error");
+  // A rejected upstream promise may include request details in its message.
+  // Classify it, but never retain it as an error cause.
+  return error instanceof AiProviderError ? error : new AiProviderError("network-error");
 }
 
 /**
  * The last resort: no key was eligible, so no request was made at all. Only
- * reachable while every configured key is cooling down after a provider rejection;
- * the reported status is the one that caused the most recent quarantine.
+ * reachable while every configured NVIDIA key is cooling down after a provider
+ * rejection; the reported status is the one that caused the most recent quarantine.
  */
 function unavailableKeyError(pool: KeyPool, label: string): AiProviderError {
   console.error(
-    `[openrouter] No eligible API key for the ${label}; every configured key is cooling down after a provider rejection.`,
+    `[nvidia] No eligible API key for the ${label}; every configured key is cooling down after a provider rejection.`,
   );
   return new AiProviderError("http-error", { status: pool.lastStatus });
 }
 
-/** Only a successful `choices[0].message.content` can become an answer. */
+/**
+ * Only `choices[0].message.content` is of interest. An upstream error or a
+ * `finish_reason: "error"` cannot become a successful reply even when some text
+ * was included before the failure. Nothing else in the payload is forwarded.
+ */
 function readAssistantContent(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;
   const result = payload as { choices?: unknown; error?: unknown };
-  // A gateway may send a 200 with an error object alongside provisional text.
   if (result.error != null) return null;
   const choices = result.choices;
   if (!Array.isArray(choices) || choices.length === 0) return null;
@@ -237,15 +277,21 @@ function readAssistantContent(payload: unknown): string | null {
   return typeof content === "string" ? content : null;
 }
 
-/** Limit JSON bytes *as they arrive*, rather than buffering a whole response first. */
-async function readBoundedJsonText(response: Response, signals: Signals): Promise<string> {
+/**
+ * Reads the JSON response with a byte limit as it arrives — `Response.text()`
+ * would buffer an arbitrarily large body before a length check. A canceled body
+ * read is unblocked explicitly, even when a gateway/fetch stub ignores the
+ * request signal. Never retain more than the accepted bound in memory.
+ */
+async function readBoundedText(response: Response, signals: Signals): Promise<string> {
   const body = response.body;
   if (!body) throw new AiProviderError("malformed-response");
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
-  // A mocked gateway may ignore the fetch signal and leave a body read pending.
-  const abortRead = () => { void reader.cancel().catch(() => {}); };
+  const abortRead = () => {
+    void reader.cancel().catch(() => {});
+  };
   signals.request.addEventListener("abort", abortRead, { once: true });
 
   try {
@@ -255,13 +301,15 @@ async function readBoundedJsonText(response: Response, signals: Signals): Promis
       try {
         chunk = await reader.read();
       } catch (error) {
+        // A broken body is a network failure, or a timeout/caller abort when its
+        // signal fired. It is not malformed JSON, so another key may retry it.
         throw mapFetchFailure(error, signals);
       }
       if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) {
-        console.error("[openrouter] Reply response exceeded the accepted size.");
+        console.error("[nvidia] Reply response exceeded the accepted size.");
         throw new AiProviderError("malformed-response");
       }
       chunks.push(chunk.value);
@@ -282,24 +330,27 @@ async function readBoundedJsonText(response: Response, signals: Signals): Promis
   return new TextDecoder().decode(joined);
 }
 
-/** Reads a non-streamed answer; upstream bodies and parser errors never reach logs. */
+/** Reads the assistant text; the raw provider body is never logged or forwarded. */
 async function readJsonReply(response: Response, signals: Signals): Promise<string> {
-  const text = await readBoundedJsonText(response, signals);
+  const text = await readBoundedText(response, signals);
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
-    console.error("[openrouter] Reply response was not valid JSON.");
+    // A JSON parser error can contain snippets of the provider response in its
+    // message. That body may echo our input or credential, so don't keep the
+    // SyntaxError as `cause` and don't print the original text either.
+    console.error("[nvidia] Reply response was not valid JSON.");
     throw new AiProviderError("malformed-response");
   }
 
   const content = readAssistantContent(payload);
   if (content === null) {
-    console.error("[openrouter] Reply response had no assistant message.");
+    console.error("[nvidia] Reply response had no assistant message.");
     throw new AiProviderError("malformed-response");
   }
   if (content.trim() === "") {
-    console.error("[openrouter] Reply response was empty.");
+    console.error("[nvidia] Reply response was empty.");
     throw new AiProviderError("empty-response");
   }
 
@@ -307,52 +358,83 @@ async function readJsonReply(response: Response, signals: Signals): Promise<stri
 }
 
 /**
- * The text of one streamed chunk. OpenRouter sends `choices[0].delta.content`;
- * a `message.content` field is accepted too, because a non-streaming answer may
- * arrive on this path when a gateway ignores `stream: true`.
+ * The text of one streamed chunk. NVIDIA sends `choices[0].delta.content`; a
+ * `message.content` field is accepted too, because a non-streaming answer may arrive
+ * on this path when a gateway ignores `stream: true`.
+ *
+ * Anything else a chunk may carry is ignored on purpose. NVIDIA endpoints are known
+ * to add non-standard fields alongside `delta.content` (a `reasoning` trace, for
+ * instance), and those are provider metadata, not assistant text: forwarding them
+ * would put a model's scratchpad in front of the user and in the database.
  */
 function readChunk(payload: unknown): { text: string; finished: boolean } {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload))
-    throw new AiProviderError("malformed-response");
-  const result = payload as { choices?: unknown; error?: unknown };
-  // A 200 stream can still contain an error frame after provisional deltas. Never
-  // mistake a following [DONE] for confirmation that those deltas are a reply.
-  if (result.error != null) {
-    console.error("[openrouter] Streaming reply contained a provider error frame.");
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    console.error("[nvidia] Streaming reply contained an invalid chunk shape.");
     throw new AiProviderError("malformed-response");
   }
-  if (!Array.isArray(result.choices)) throw new AiProviderError("malformed-response");
-  // Usage-only frames carry no answer and are safe to ignore.
-  if (result.choices.length === 0) return { text: "", finished: false };
-
-  const first = result.choices[0];
-  if (typeof first !== "object" || first === null || Array.isArray(first))
+  const result = payload as { choices?: unknown; error?: unknown };
+  if (result.error != null) {
+    // Some gateways send a 200 SSE response and then an error frame. The error
+    // object can include credentials or the prompt, so neither it nor a cause is
+    // ever logged or forwarded. Any text already yielded stays provisional.
+    console.error("[nvidia] Streaming reply contained a provider error frame.");
     throw new AiProviderError("malformed-response");
+  }
+  const choices = result.choices;
+  if (!Array.isArray(choices)) {
+    console.error("[nvidia] Streaming reply contained an invalid chunk shape.");
+    throw new AiProviderError("malformed-response");
+  }
+  // OpenAI-compatible usage-only frames may carry `choices: []` after the final
+  // token. They contain no assistant text, and are safe to ignore.
+  if (choices.length === 0) return { text: "", finished: false };
+
+  const first = choices[0];
+  if (typeof first !== "object" || first === null || Array.isArray(first)) {
+    console.error("[nvidia] Streaming reply contained an invalid choice.");
+    throw new AiProviderError("malformed-response");
+  }
   const choice = first as {
     delta?: { content?: unknown };
     message?: { content?: unknown };
     finish_reason?: unknown;
   };
   if (choice.finish_reason === "error") {
-    console.error("[openrouter] Streaming reply ended with a provider error.");
+    console.error("[nvidia] Streaming reply ended with a provider error.");
     throw new AiProviderError("malformed-response");
   }
+  // The official chunk shape is a delta plus a nullable finish reason. A final
+  // chunk may have only `finish_reason`; a role/usage-only chunk may have no text.
+  // Unexpected objects are not silently skipped — that could make `[DONE]` turn a
+  // half answer into a stored, apparently complete reply.
   if (
     (choice.delta !== undefined &&
       (typeof choice.delta !== "object" || choice.delta === null || Array.isArray(choice.delta))) ||
     (choice.message !== undefined &&
-      (typeof choice.message !== "object" || choice.message === null || Array.isArray(choice.message))) ||
-    (choice.finish_reason !== undefined && choice.finish_reason !== null && typeof choice.finish_reason !== "string") ||
+      (typeof choice.message !== "object" ||
+        choice.message === null ||
+        Array.isArray(choice.message))) ||
+    (choice.finish_reason !== undefined &&
+      choice.finish_reason !== null &&
+      typeof choice.finish_reason !== "string") ||
     (choice.delta === undefined && choice.message === undefined && !choice.finish_reason)
-  ) throw new AiProviderError("malformed-response");
+  ) {
+    console.error("[nvidia] Streaming reply contained an invalid choice.");
+    throw new AiProviderError("malformed-response");
+  }
 
   const delta = choice.delta?.content;
   const message = choice.message?.content;
-  if ((delta != null && typeof delta !== "string") || (message != null && typeof message !== "string"))
+  if (
+    (delta != null && typeof delta !== "string") ||
+    (message != null && typeof message !== "string")
+  ) {
+    console.error("[nvidia] Streaming reply contained non-text assistant content.");
     throw new AiProviderError("malformed-response");
+  }
   const text = typeof delta === "string" ? delta : typeof message === "string" ? message : "";
   // A final chunk may carry only `finish_reason`; that is a valid completion marker
-  // for providers that close the stream without `[DONE]`.
+  // for a stream that closes without `[DONE]`.
   const finished = typeof choice.finish_reason === "string" && choice.finish_reason !== "";
   return { text, finished };
 }
@@ -384,6 +466,8 @@ type FrameResult = { kind: "none" } | { kind: "data"; text: string; done: boolea
 
 function applyFrame(frame: string): FrameResult {
   const data = readEventData(frame);
+  // A blank `data:` keep-alive is not a JSON chunk. Ignore it; non-empty data
+  // that is not JSON still fails loudly as a malformed provider response.
   if (data === null || data === "") return { kind: "none" };
   if (data === STREAM_DONE) return { kind: "data", text: "", done: true };
 
@@ -391,8 +475,8 @@ function applyFrame(frame: string): FrameResult {
   try {
     payload = JSON.parse(data);
   } catch {
-    // SyntaxError messages can quote upstream data (including an echoed key).
-    console.error("[openrouter] Streaming reply contained an unreadable chunk.");
+    // JSON.parse errors may quote the upstream data (including an echoed key).
+    console.error("[nvidia] Streaming reply contained an unreadable chunk.");
     throw new AiProviderError("malformed-response");
   }
 
@@ -420,7 +504,7 @@ async function* streamReplyOnce(
 
   const body = response.body;
   if (!body) {
-    console.error("[openrouter] Streaming reply had no response body.");
+    console.error("[nvidia] Streaming reply had no response body.");
     throw new AiProviderError("malformed-response");
   }
 
@@ -431,9 +515,13 @@ async function* streamReplyOnce(
   let text = "";
   let complete = false;
   let finishedReading = false;
-  // Abort even when a gateway/fetch double ignores the request signal while a
-  // body read is pending; otherwise a cancelled or timed-out stream could hang.
-  const abortRead = () => { void reader.cancel().catch(() => {}); };
+  // Some fetch implementations leave a body read pending even after the request's
+  // signal aborts. Cancel it ourselves as well, so a disconnect or deadline always
+  // unblocks iteration. The signal check in the loop maps cancellation to its
+  // normalized reason even if reader.cancel resolves a pending read as `done`.
+  const abortRead = () => {
+    void reader.cancel().catch(() => {});
+  };
   signals.request.addEventListener("abort", abortRead, { once: true });
 
   try {
@@ -452,7 +540,7 @@ async function* streamReplyOnce(
         }
         if (finishedReading) {
           // A provider may close without a trailing blank line; the remaining
-          // text is still a complete event. A lone CR is a line break too.
+          // text is still a complete event. A final lone CR is an SSE line break.
           buffer = buffer.replace(/\r$/, "\n");
           if (buffer.trim() !== "") {
             frame = buffer;
@@ -476,12 +564,13 @@ async function* streamReplyOnce(
 
         bytes += chunk.value.byteLength;
         if (bytes > MAX_STREAM_BYTES) {
-          console.error("[openrouter] Streaming reply exceeded the accepted size.");
+          console.error("[nvidia] Streaming reply exceeded the accepted size.");
           throw new AiProviderError("too-long");
         }
 
-        // Leave a trailing CR unresolved until the next read: a following LF is
-        // part of the same line ending, not a second blank line/frame.
+        // Leave a CR at the end of the buffer unresolved until the next read: if
+        // its following LF arrives in another byte chunk, they are *one* line
+        // break, not two. A lone CR inside the buffer is a line break on its own.
         buffer += decoder.decode(chunk.value, { stream: true });
         buffer = buffer.replace(/\r\n/g, "\n").replace(/\r(?!$)/g, "\n");
       }
@@ -493,8 +582,8 @@ async function* streamReplyOnce(
       if (result.kind === "none") continue;
       if (result.text !== "") {
         text += result.text;
-        if (text.length > OPENROUTER_MAX_REPLY_CHARACTERS) {
-          console.error("[openrouter] Streaming reply exceeded the reply size limit.");
+        if (text.length > NVIDIA_MAX_REPLY_CHARACTERS) {
+          console.error("[nvidia] Streaming reply exceeded the reply size limit.");
           throw new AiProviderError("too-long");
         }
         yield { type: "delta", text: result.text };
@@ -513,21 +602,21 @@ async function* streamReplyOnce(
 
   if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
   if (!complete) {
-    console.error("[openrouter] Streaming reply ended before a completion marker.");
+    console.error("[nvidia] Streaming reply ended before a completion marker.");
     throw new AiProviderError("malformed-response");
   }
   if (text.trim() === "") {
-    console.error("[openrouter] Streaming reply was empty.");
+    console.error("[nvidia] Streaming reply was empty.");
     throw new AiProviderError("empty-response");
   }
 }
 
 /**
  * Streams the assistant answer of one conversation turn, rotating through the
- * configured keys when a request fails for a reason another key could avoid.
+ * configured NVIDIA keys when a request fails for a reason another key could avoid.
  *
  * The key pool decides which key each attempt uses, and one request tries at most
- * `min(configured keys, MAX_KEY_ATTEMPTS)` of them. Two rules keep this safe:
+ * `min(configured keys, NVIDIA_MAX_KEY_ATTEMPTS)` of them. Two rules keep this safe:
  * a key that already failed for this request is never offered again, and rotation
  * only happens while no delta has been forwarded. Once the caller has received
  * assistant text the answer has started, so a later failure is reported exactly as
@@ -538,15 +627,15 @@ export async function* streamReply(
   options: GenerateReplyOptions = {},
 ): AsyncGenerator<ReplyStreamChunk, void, void> {
   const config = readConfig();
-  // The catalog decides the identifier; a key the catalog does not offer fails
+  // The catalog decides the identifier; a key it does not offer for NVIDIA fails
   // here, before any network call and without touching the key pool.
   const model = modelIdentifier(options.model);
-  const pool = getKeyPool(config.keys);
+  const pool = getKeyPool(config.keys, PROVIDER);
   const signals = requestSignals(options);
   const tried = new Set<string>();
   let lastFailure: AiProviderError | null = null;
 
-  for (let attempt = 0; attempt < Math.min(pool.size, MAX_KEY_ATTEMPTS); attempt += 1) {
+  for (let attempt = 0; attempt < Math.min(pool.size, NVIDIA_MAX_KEY_ATTEMPTS); attempt += 1) {
     const key = pool.select({ exclude: tried });
     if (!key) break;
     tried.add(key);
@@ -602,12 +691,12 @@ export async function generateReply(
 ): Promise<string> {
   const config = readConfig();
   const model = modelIdentifier(options.model);
-  const pool = getKeyPool(config.keys);
+  const pool = getKeyPool(config.keys, PROVIDER);
   const signals = requestSignals(options);
   const tried = new Set<string>();
   let lastFailure: AiProviderError | null = null;
 
-  for (let attempt = 0; attempt < Math.min(pool.size, MAX_KEY_ATTEMPTS); attempt += 1) {
+  for (let attempt = 0; attempt < Math.min(pool.size, NVIDIA_MAX_KEY_ATTEMPTS); attempt += 1) {
     const key = pool.select({ exclude: tried });
     if (!key) break;
     tried.add(key);
@@ -629,8 +718,8 @@ export async function generateReply(
   throw lastFailure ?? unavailableKeyError(pool, "reply");
 }
 
-export const openRouterProvider: ReplyProvider = {
-  name: "openrouter",
+export const nvidiaProvider: ReplyProvider = {
+  name: "nvidia",
   generateReply,
   streamReply(
     turns: readonly ChatTurn[],

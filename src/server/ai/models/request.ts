@@ -1,8 +1,9 @@
 import "server-only";
+import { readBoundedRequestBody } from "../../api/request-body";
 
 /**
  * Strict parsing for the model-selection request. Exactly one field is accepted —
- * a catalog key — and everything else (an OpenRouter identifier, a provider name, a
+ * a catalog key — and everything else (a raw provider identifier, a provider name, a
  * `userId` override) is rejected instead of ignored. The key is only a *candidate*
  * here: the route and the service both re-check it against the server catalog.
  */
@@ -24,12 +25,11 @@ export async function parseModelSelectionRequest(
   request: Request,
 ): Promise<ParsedModelSelection> {
   const contentType = request.headers.get("content-type") ?? "";
-  const raw = await request.text();
+  const raw = await readBoundedRequestBody(request, MAX_MODEL_REQUEST_BYTES);
+  if (raw === null) return { ok: false, message: "That request is too large." };
   const body = raw.trim();
 
   if (body === "") return { ok: false, message: "Send a JSON object with a modelKey." };
-  if (body.length > MAX_MODEL_REQUEST_BYTES)
-    return { ok: false, message: "That request is too large." };
   if (!contentType.toLowerCase().includes("application/json"))
     return { ok: false, message: "Send this request as JSON." };
 

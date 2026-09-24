@@ -1,4 +1,5 @@
 import "server-only";
+import { readBoundedRequestBody } from "../api/request-body";
 
 /**
  * Strict parsing for the pet-selection request. Exactly one field is accepted —
@@ -26,12 +27,11 @@ async function parseSingleStringField(
   noun: string,
 ): Promise<{ ok: true; value: string } | { ok: false; message: string }> {
   const contentType = request.headers.get("content-type") ?? "";
-  const raw = await request.text();
+  const raw = await readBoundedRequestBody(request, MAX_PET_REQUEST_BYTES);
+  if (raw === null) return { ok: false, message: "That request is too large." };
   const body = raw.trim();
 
   if (body === "") return { ok: false, message: `Send a JSON object with a ${noun}.` };
-  if (body.length > MAX_PET_REQUEST_BYTES)
-    return { ok: false, message: "That request is too large." };
   if (!contentType.toLowerCase().includes("application/json"))
     return { ok: false, message: "Send this request as JSON." };
 

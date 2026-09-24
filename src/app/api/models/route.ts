@@ -22,10 +22,10 @@ import { getSelectedModelKey, saveSelectedModelKey } from "@/server/ai/models/se
  * user-scoped and require a session. `PUT` stores one selection.
  *
  * The client sends a catalog **key** and nothing else. The route rejects unknown
- * and inactive keys, and the OpenRouter identifier is only ever resolved from the
- * catalog, so a browser cannot activate a model the server does not offer, and
- * cannot name a provider model directly. No provider configuration, key, or
- * identifier is included in a response.
+ * and inactive keys; the model's provider and its identifier are resolved only
+ * from the catalog, so a browser cannot activate a model the server does not offer,
+ * name a provider model directly, or override the provider separately. No provider
+ * configuration, credential, or identifier is included in a response.
  */
 
 /** Only the catalog fields the selector needs; no provider or internal columns. */

@@ -18,10 +18,16 @@ import { reactionForChatPhase, type ChatPhase, type PetReactionEvent } from "../
  * - the first content event is reported once, however many deltas arrive;
  * - once an outcome has been reported, no other outcome can follow it, so a cancelled
  *   or failed generation can never be followed by a success reaction from a late
- *   callback.
+ *   callback;
+ * - once the generation has been *replaced*, nothing at all can follow — not even a
+ *   first-content event from a delta that was already in flight — because the newer
+ *   generation is the one the companion is following now.
  *
  * A new instance is created per generation, which is what scopes those guarantees to
- * one reply instead of to the component's lifetime.
+ * one reply instead of to the component's lifetime. The instance is retired in the
+ * same step as the request it belongs to (see `superseded` and `cancelled`), so a
+ * generation that is no longer current has no route back to the pet: no timer, no
+ * second state, and nothing to clean up later.
  *
  * Client-side only. No network, no database, no persistence, and nothing here reaches
  * a provider: the events describe the chat, they are never sent anywhere.
@@ -39,6 +45,12 @@ export type ChatPetReactions = {
   failed: () => void;
   /** The active generation was aborted. */
   cancelled: () => void;
+  /**
+   * A newer generation replaced this one. Seals the reporter *without* reporting:
+   * the replacement is authoritative from here and announces itself, so the
+   * generation going away must not settle, fail, or celebrate in its name.
+   */
+  superseded: () => void;
 };
 
 /**
@@ -77,5 +89,10 @@ export function createChatPetReactions(
     completed: () => outcome("stream-completed"),
     failed: () => outcome("stream-error"),
     cancelled: () => outcome("stream-cancelled"),
+    // Sealed like an outcome, but silent: the newer generation's own reports are what
+    // the companion follows, so nothing is dispatched on the way out.
+    superseded: () => {
+      outcomeReported = true;
+    },
   };
 }
