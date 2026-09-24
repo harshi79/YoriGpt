@@ -1,6 +1,6 @@
 import "server-only";
 import { AiNotConfiguredError, AiProviderError } from "../ai/errors";
-import { openRouterProvider } from "../ai/providers/openrouter";
+import { resolveReplyProvider } from "../ai/providers";
 import { resolveReplyModelKey } from "../ai/models/service";
 import { resolveAiPetContext, type AiPetContext } from "../ai/pet-context";
 import type { ChatTurn } from "../ai/types";
@@ -18,6 +18,11 @@ import type { MessageRole, MessageSummary } from "@/features/conversations/types
  * streaming path forwards provider deltas as they come and stores the text once
  * the provider is finished; the non-streaming path waits for the whole answer.
  * Nothing about ownership, history, limits, or persistence is duplicated.
+ *
+ * Which provider answers is not decided here either. The prepared turn carries a
+ * catalog model key, `resolveReplyProvider` maps that key to the adapter that owns
+ * it, and this file talks to the returned `ReplyProvider` — so both paths stay
+ * provider-neutral and a second AI service costs nothing here.
  *
  * Preparation also resolves the caller's **companion context** (`AiPetContext`) —
  * the safe, catalog-resolved projection of their stored pet and personality. It is
@@ -85,7 +90,8 @@ export type PreparedReply = {
    * Catalog key of the model to generate with: the signed-in user's saved choice
    * when it is still offered, otherwise the configured default. It is a key from
    * the server-owned catalog, never a provider identifier and never anything a
-   * browser sent; the adapter resolves it to the OpenRouter identifier.
+   * browser sent. It selects the adapter as well: the adapter that owns this key
+   * resolves it to its own provider identifier.
    */
   modelKey: string;
   /**
@@ -207,8 +213,10 @@ export async function generateAssistantReply(
 
   let content: string;
   try {
-    // The model comes from the server catalog, keyed by the user's stored choice.
-    content = await openRouterProvider.generateReply(prepared.turns, {
+    // The model comes from the server catalog, keyed by the user's stored choice,
+    // and the catalog entry decides which provider adapter answers.
+    const provider = resolveReplyProvider(prepared.modelKey);
+    content = await provider.generateReply(prepared.turns, {
       model: prepared.modelKey,
     });
   } catch (error) {
@@ -248,9 +256,10 @@ export async function* streamAssistantReply(
   let text = "";
   try {
     const model = { model: prepared.modelKey };
+    const provider = resolveReplyProvider(prepared.modelKey);
     const stream = options.signal
-      ? openRouterProvider.streamReply(prepared.turns, { ...model, signal: options.signal })
-      : openRouterProvider.streamReply(prepared.turns, model);
+      ? provider.streamReply(prepared.turns, { ...model, signal: options.signal })
+      : provider.streamReply(prepared.turns, model);
     for await (const chunk of stream) {
       text += chunk.text;
       yield { type: "delta", text: chunk.text };

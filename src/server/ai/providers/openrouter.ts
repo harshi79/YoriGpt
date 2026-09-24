@@ -12,7 +12,7 @@ import type {
 } from "../types";
 
 /**
- * The only AI provider in the project. It speaks OpenRouter's OpenAI-compatible
+ * The incumbent AI provider. It speaks OpenRouter's OpenAI-compatible
  * chat-completions API over the plain `fetch` of the server runtime — no SDK, no
  * key in the browser. Everything provider-specific lives in this file: the request
  * shape, the server-sent-event framing of a streaming answer, `[DONE]` handling,

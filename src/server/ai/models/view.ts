@@ -9,8 +9,8 @@ import { getSelectedModelKey } from "./service";
  * — the catalog still renders, so the selector stays usable and honest instead of
  * silently presenting the default as the user's own choice.
  *
- * Only catalog keys, names, and descriptions cross to the client; the OpenRouter
- * identifier stays on the server.
+ * Only catalog keys, names, and descriptions cross to the client; the provider
+ * and its identifier stay on the server.
  */
 export async function loadModelSelection(user: { id: string } | null): Promise<ModelSelection> {
   const models = listSelectableModels().map(({ key, name, description }) => ({

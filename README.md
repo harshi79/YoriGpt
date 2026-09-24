@@ -1,21 +1,16 @@
 # YoriGPT
 
-A Node.js application foundation, responsive chat shell, PostgreSQL data
-foundation, email/password authentication, a **user-scoped conversation and message
-data flow**, **streaming OpenRouter assistant replies**, and **account settings with
-a persistent theme preference** for YoriGPT. One
-server-side provider streams a reply for a stored user message over server-sent
-events while the browser renders it, and the finished answer is stored; several
-OpenRouter keys rotate with a short cooldown when one is refused or rate limited,
-and now a foundational **interactive 2D pet framework** with a development
-playground, **persistent per-account pet selection**, persistent personalities, and a
-deterministic local reaction engine that follows the real chat lifecycle and gives
-those personalities observably different reactions — while
-other settings still do not exist. The home route is an original
-charcoal-and-mint interface — with a light palette behind the theme preference —
-ready for later service integration. The chat shell
-stays usable for signed-out visitors, but conversations belong to an authenticated
-account: they are created, listed, opened, and deleted only for their owner.
+A Node.js application with a responsive chat shell, PostgreSQL data foundation,
+email/password authentication, and a **user-scoped conversation and message flow**.
+Assistant replies can stream from **OpenRouter or NVIDIA NIM**: the server chooses a
+provider from its own model catalog, streams a provider-neutral answer over SSE,
+and stores the reply only after the generation completes. Each provider has its own
+server-only, rotating key pool; the existing OpenRouter model remains the default.
+Account settings include a persistent theme preference. The interactive 2D pet
+framework has persistent per-account selection and personalities and a deterministic
+local reaction engine that follows the real chat lifecycle. No pet dialogue or
+personality prompting is sent to either AI provider yet. Signed-out visitors can
+view the chat shell, but conversations belong to an authenticated account.
 
 ## Prerequisites
 
@@ -153,23 +148,26 @@ All configuration below is **server-only**:
 | `AUTH_SECRET`                                | Authentication is used; random secret, at least 32 characters        |
 | `AUTH_TRUSTED_ORIGINS`                       | Extra deployed/preview origins may call the auth API (optional)       |
 | `SMTP_URL`, `EMAIL_FROM`                     | Verification/reset emails should be delivered (optional)             |
-| `OPENROUTER_API_KEYS`                        | Assistant replies should be generated; comma-separated and rotated (otherwise they report "not configured") |
+| `OPENROUTER_API_KEYS`                        | An OpenRouter model is selected; comma-separated, rotated server-side |
 | `OPENROUTER_BASE_URL`                        | Optional; defaults to `https://openrouter.ai/api/v1`                 |
-| `OPENROUTER_MODEL`                           | Optional; names the **default** model when it matches an active catalog entry (otherwise the catalog default is used and a warning is logged once) |
-| `NVIDIA_API_KEYS`, `NVIDIA_BASE_URL`         | Future NVIDIA integration is used                                    |
+| `OPENROUTER_MODEL`                           | Optional legacy default name; an active catalog key or identifier (defaults to OpenRouter's `gpt-4o-mini` when unset) |
+| `NVIDIA_API_KEYS`                            | A NVIDIA model is selected; comma-separated, rotated in a separate pool |
+| `NVIDIA_BASE_URL`                            | Optional; defaults to `https://integrate.api.nvidia.com/v1`          |
 
 `src/server/env.ts` exports `getServerEnv(scope)`. Validation runs **only when
 called**, for the selected scope, not on import. Call it inside the relevant
 server service, never at module scope or in the root layout. It rejects invalid
 URLs, missing credentials, short authentication secrets, and a key list with no
 usable entry (blank entries inside a list are ignored). Errors identify fields without
-printing their values. Provider URLs have defaults and `OPENROUTER_MODEL` is optional; API keys
-have none. Which model a reply uses is decided by the server catalog
-(`src/server/ai/models/catalog.ts`), never by a request body. A key list is read once per request from this layer and handed to the
-server-only key pool, which owns rotation. Streaming reuses the same variables: there
-is no separate streaming key, endpoint, or model. Absent credentials never break the build or
-the stored-message flow: the reply endpoint answers a controlled
-`AI_NOT_CONFIGURED` error and says so in the UI.
+printing their values. Provider URLs have defaults and `OPENROUTER_MODEL` is optional;
+API keys have none. The current model is chosen from the server catalog
+(`src/server/ai/models/catalog.ts`), never by a reply request body; that entry
+selects the provider. A key list is read only for the selected provider and handed
+to its isolated server-only key pool. Streaming reuses the same variables: there is
+no separate streaming key, endpoint, or model. Absent credentials never break the
+build or the stored-message flow: a reply through the unconfigured provider answers
+a controlled `AI_NOT_CONFIGURED` error. OpenRouter continues working without any
+NVIDIA credential, and the reverse is true for a selected NVIDIA model.
 
 The `server-only` import prevents this module from entering a client component's
 import graph. Never use `NEXT_PUBLIC_` for secrets, pass configuration objects to
@@ -234,7 +232,7 @@ Database commands:
 - The auth migration `20260923010000_add_better_auth` is additive: it creates
   `sessions`, `accounts`, and `verifications` only.
 - `npm run db:migrate -- --name <name>` — future development schema changes only.
-- `DATABASE_TEST_URL=... npm run test:db` — opt-in read-only PostgreSQL checks.
+- `DATABASE_TEST_URL=... npm run test:db` — opt-in checks against a disposable, migrated PostgreSQL database.
 
 **Sandbox limitation:** standard native Prisma commands still fail to download
 engines because TLS to `binaries.prisma.sh` is terminated. Validation, generation,
@@ -280,7 +278,7 @@ truncated. `GET` returns the stored messages in ascending position order, capped
 500 with a `truncated` flag. There is no role, admin, bulk, or assistant-message
 authorization, and no message editing or deletion yet.
 
-## Assistant replies (OpenRouter)
+## Assistant replies (OpenRouter and NVIDIA NIM)
 
 `POST /api/conversations/:id/reply` is the **only** generation endpoint — there is no
 `/api/chat` and no `/api/providers`. (`GET`/`PUT /api/models` exist, but only to list
@@ -302,18 +300,28 @@ The endpoint answers two encodings of the same generation:
 
 Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
 
-- `src/server/ai/providers/openrouter.ts` is the single adapter. It calls the official
-  OpenAI-compatible `POST {baseUrl}/chat/completions` with `{ model, messages, stream:
-  true }` (`stream: false` for the JSON path) — where `model` is the OpenRouter
-  identifier the catalog resolved from the selected catalog key — the key from
-  `OPENROUTER_API_KEYS`, a
-  30-second overall deadline, a 1 MB response/stream cap, a 16,000-character reply
-  cap, and only status codes in its logs — never the key, the prompt, or the provider
-  body. Failures are normalized to `timeout`, `aborted`, `http-error`,
-  `malformed-response`, `empty-response`, `network-error`, or `too-long`.
-- `src/server/ai/key-pool/` owns key selection and nothing else: it reads the keys
-  through the env layer, hands them out in deterministic round-robin order, and skips
-  a key the provider rejected (401/403) or rate limited (429) for a 30-second cooldown
+- `src/server/ai/providers/index.ts` dispatches from the **selected catalog key**
+  to its entry's provider, and then to exactly one adapter. No browser request can
+  supply a separate provider. The OpenRouter adapter is unchanged except for a
+  documentation comment; `src/server/ai/providers/nvidia.ts` implements the same
+  `ReplyProvider` interface without moving orchestration, database logic, or pet
+  context into either adapter.
+- Each adapter calls its official OpenAI-compatible
+  `POST {baseUrl}/chat/completions` with exactly `{ model, messages, stream }`:
+  the `model` identifier comes from that provider's catalog entry, never from a
+  browser or an untrusted preference. NVIDIA's hosted endpoint is
+  [`https://integrate.api.nvidia.com/v1/chat/completions`](https://docs.api.nvidia.com/nim/reference/llm-apis).
+  Its [Llama 3.3 70B NIM API](https://docs.api.nvidia.com/nim/reference/meta-llama-3_3-70b-instruct-infer)
+  documents both the model identifier and `data: [DONE]` SSE streaming. Only the
+  chosen provider's server-only key signs the request. Each adapter has a 30-second
+  overall deadline, a 1 MB response/stream cap, a 16,000-character streaming reply
+  cap, and status-only logs — never keys, prompts, authorization headers, or raw
+  provider bodies. Failures use the same categories: `timeout`, `aborted`,
+  `http-error`, `malformed-response`, `empty-response`, `network-error`, or
+  `too-long`.
+- `src/server/ai/key-pool/` owns key selection and nothing else: it receives keys
+  validated by the env layer, hands them out in deterministic round-robin order, and skips
+  a key its provider rejected (401/403) or rate limited (429) for a 30-second cooldown
   before it becomes eligible again. One request tries at most
   `min(configured keys, 3)` keys and never the same key twice, so rotation is bounded
   and a single request cannot hammer a failing key. Only failures another key could
@@ -321,15 +329,20 @@ Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
   attempts are reported as they are. Streaming rotates only before the first delta is
   forwarded: once the browser has answer text, a failure is reported exactly as
   before rather than splicing two answers together. Cooldown state is per process and
-  in memory (never in PostgreSQL), and key values never reach a log line, an SSE
-  event, an error message, or the client bundle.
-- The adapter owns OpenRouter's framing entirely: it parses the stream incrementally
-  (frames split across reads, CRLF endings, a UTF-8 character split across chunks, `:`
-  keep-alive comments, unknown fields), ends on `data: [DONE]` **or** a chunk carrying
-  `finish_reason`, and yields one normalized `{ type: "delta", text }` per provider
-  chunk. A stream that stops before either marker is a `malformed-response`, so a
-  truncated answer can never be mistaken for a finished one. No provider payload
-  reaches the service, the route, or the browser.
+  in memory (never in PostgreSQL) and keyed by **provider plus configured key list**:
+  NVIDIA and OpenRouter cannot share a cooldown or cursor even if their configured
+  strings happen to match. A 5xx or network failure may retry with another key
+  without quarantining it; a non-retryable response, timeout, abort, or an answer
+  that has emitted its first delta cannot rotate. Key values never reach a log
+  line, SSE event, error message, or client bundle.
+- Each adapter owns its upstream SSE framing. NVIDIA handles frames split across
+  reads (including CRLF and UTF-8 splits), keep-alives, empty and usage-only chunks,
+  `data: [DONE]`, and a `finish_reason` marker, forwarding only
+  `{ type: "delta", text }` to the reply service. A malformed chunk, explicit
+  upstream error frame, `finish_reason: "error"`, or truncated stream is a failure,
+  never a finished answer. Aborting the request cancels the upstream read even if
+  the fetch runtime leaves a body pending. No provider payload reaches the route
+  or browser; the browser always sees the same `delta`, `done`, and `error` events.
 - `reply.ts` builds history from the **stored** rows only: newest at most 40 turns
   within 24,000 characters, mapping `USER` → `user` and `ASSISTANT` → `assistant`, with
   no ids, positions, or invented system prompt. It then persists the reply with a
@@ -357,7 +370,8 @@ Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
   failing a reply. `prepareReply` resolves it beside the history and the model key and
   carries it on the prepared reply for both paths. **No prompt, turn, or provider
   request is built from it yet**: the adapter still receives turns and a catalog model
-  key, and stays unaware of pets, preferences, and the database.
+  key, and stays unaware of pets, preferences, and the database. This remains true
+  for both providers; pet-driven dialogue is a separate task.
 
 The SSE protocol is small and documented in `src/features/conversations/types.ts`:
 
@@ -391,28 +405,39 @@ turn.
 
 The models a reply can use are owned by the server, in code:
 `src/server/ai/models/catalog.ts`. It is a short, explicit list — nothing is fetched
-from OpenRouter, and the app boots (and builds) without a database or a key. Each
-entry is:
+from either provider, and the app boots (and builds, once Prisma is generated)
+without a model-API round trip or provider key. Each entry names a stable internal
+key, a provider, that provider's documented identifier, a display name, and active
+metadata:
 
-| Catalog key         | OpenRouter identifier               | Shown as          | State    |
-| ------------------- | ----------------------------------- | ----------------- | -------- |
-| `gpt-4o-mini`       | `openai/gpt-4o-mini`                | GPT-4o mini       | active (**default**) |
-| `gpt-4o`            | `openai/gpt-4o`                     | GPT-4o            | active   |
-| `claude-3.5-haiku`  | `anthropic/claude-3.5-haiku`        | Claude 3.5 Haiku  | active   |
-| `claude-3.7-sonnet` | `anthropic/claude-3.7-sonnet`       | Claude 3.7 Sonnet | active   |
-| `llama-3.1-70b`     | `meta-llama/llama-3.1-70b-instruct` | Llama 3.1 70B     | retired  |
+| Catalog key              | Provider   | Provider identifier                 | Shown as          | State                |
+| ------------------------ | ---------- | ----------------------------------- | ----------------- | -------------------- |
+| `gpt-4o-mini`            | OpenRouter | `openai/gpt-4o-mini`                | GPT-4o mini       | active (**default**) |
+| `gpt-4o`                 | OpenRouter | `openai/gpt-4o`                     | GPT-4o            | active               |
+| `claude-3.5-haiku`       | OpenRouter | `anthropic/claude-3.5-haiku`        | Claude 3.5 Haiku  | active               |
+| `claude-3.7-sonnet`      | OpenRouter | `anthropic/claude-3.7-sonnet`       | Claude 3.7 Sonnet | active               |
+| `llama-3.1-70b`          | OpenRouter | `meta-llama/llama-3.1-70b-instruct` | Llama 3.1 70B     | retired              |
+| `nvidia-llama-3.3-70b`   | NVIDIA NIM | `meta/llama-3.3-70b-instruct`      | Llama 3.3 70B    | active               |
 
 The **catalog key is the only model name the browser ever sees or sends**. The
-OpenRouter identifier is resolved on the server, from this list, immediately before
-the provider is called; an unknown, retired, empty, or raw-identifier value is
-refused before any request is made. A retired entry stays in the list (and in the
-database, see below) but is never offered, never selectable, and never used.
+provider and its identifier are resolved on the server from this list immediately
+before generation; an unknown, retired, empty, or raw-identifier value is refused
+before any request is made. A retired entry stays in the list (and in the database,
+see below) but is never offered, never selectable, and never used. The first five
+entries retain their previous provider and catalog order. NVIDIA's
+[`meta/llama-3.3-70b-instruct` model](https://docs.api.nvidia.com/nim/reference/meta-llama-3_3-70b-instruct-infer)
+is the initial verified NVIDIA-hosted entry; different NVIDIA models may accept
+different parameters, so expanding this list is a reviewed code-and-seed change,
+not a browser-supplied string.
 
 **Default model, in this order of precedence:**
 
 1. The signed-in account's stored preference, if it names an active catalog model.
-2. `OPENROUTER_MODEL`, if it matches an active catalog entry — by OpenRouter
-   identifier (`openai/gpt-4o`) or by catalog key (`gpt-4o`).
+2. `OPENROUTER_MODEL`, the existing deployment-default variable, if it matches an
+   active catalog entry — by provider identifier (`openai/gpt-4o` or the cataloged
+   NVIDIA identifier) or catalog key (`gpt-4o` or `nvidia-llama-3.3-70b`). This
+   legacy name is retained to avoid breaking deployments; explicitly setting it
+   to a NVIDIA entry is the only way to change the deployment default to NVIDIA.
 3. The catalog default, `gpt-4o-mini`.
 
 A preference that no longer resolves (a model retired since it was chosen) is treated
@@ -420,6 +445,21 @@ as no preference: the reply uses the next step in that list, and the fallback is
 logged once without a credential. `OPENROUTER_MODEL` likewise never invents a model:
 a value outside the catalog is ignored with a one-time warning, so a deployment
 cannot point the app at an "available" model that the selector cannot show.
+
+**Example NVIDIA default.** Leave `OPENROUTER_MODEL` unset to keep OpenRouter's
+`gpt-4o-mini` as the default. To explicitly select NVIDIA for accounts with no
+stored preference, set the following server-side variables (supply actual API keys
+through a secret manager, not a committed file):
+
+```text
+OPENROUTER_MODEL=nvidia-llama-3.3-70b
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+`NVIDIA_API_KEYS` is required at reply time for that selection, as a comma-separated
+list. An account can also select the NVIDIA catalog key through the existing model
+selector without changing the default for anyone else. OpenRouter replies never
+need `NVIDIA_API_KEYS`, and NVIDIA replies never use `OPENROUTER_API_KEYS`.
 
 **Preference API.** `GET /api/models` returns the active models (key, name, short
 description) and `selectedModelKey`; `PUT /api/models` accepts exactly
@@ -429,32 +469,43 @@ request cannot name, read, or write another account's preference. `PUT` also req
 the same trusted-origin check as every other write. Malformed JSON, an oversized
 body, a missing or non-string key, an unexpected field, an unknown key, and a retired
 model are all `400` with the standard `{ error: { code, message } }` envelope;
-unauthenticated is `401`, an untrusted origin is `403`. The OpenRouter identifier,
-the provider, the key pool's state, and the rest of the environment configuration are
-never serialized. `src/server/ai/models/request.ts` holds the strict body parsing and
+unauthenticated is `401`, an untrusted origin is `403`. No raw provider identifier,
+provider field, credential, key-pool state, or environment configuration is
+serialized. `src/server/ai/models/request.ts` holds the strict body parsing and
 `src/server/ai/models/view.ts` the read model the chat header renders; both are
 server-only.
 
 **Storage.** The preference is the existing `user_preferences.preferredModelId`
 column, which already references `ai_models` with `onDelete: SetNull`. The migration
-`prisma/migrations/20260923020000_seed_ai_models` inserts one `ai_models` row per
-catalog entry (id = catalog key, provider `OPENROUTER`, the identifier, the display
-name, and the active flag; re-runnable via `ON CONFLICT (id) DO UPDATE`). Seeding is
-therefore a migration, not a runtime requirement: every catalog key always has a row
-to reference, and nothing in the app reads the table to decide what to offer — that
-is what keeps booting without a live database possible. If the rows are missing (a
-deployment that skipped the migration), storing a preference answers a controlled
-`400` and logs the seed migration's name; replies continue to work.
+`prisma/migrations/20260923020000_seed_ai_models` inserts the five OpenRouter rows;
+`prisma/migrations/20260924000000_seed_nvidia_model` adds one NVIDIA row. Both use
+stable ids equal to catalog keys and idempotent `ON CONFLICT (id) DO UPDATE` inserts.
+The existing `ModelProvider` enum already includes NVIDIA: this second migration
+adds **data only** — no schema change, new table, enum value, index, or runtime
+catalog discovery. The row is required for the `preferredModelId` foreign key to
+accept the NVIDIA key; apply both seed migrations in deployments. The app does not
+read the table to decide what to offer. If a seed was skipped, storing that model's
+preference answers a controlled `400`; replies can still resolve catalog models.
 
-**From selection to OpenRouter.** The reply flow resolves the model once per turn:
-authenticate → `resolveReplyModelKey(userId)` (the precedence above) → carry that key
-on the prepared turn → the adapter resolves the identifier from the catalog and
-rejects anything else before a key is even selected. Both the JSON path and the SSE
-path use the same resolution, so a stream and a plain reply for the same turn cannot
-disagree. Key rotation is entirely independent of model choice: every catalog model
-uses the same `OPENROUTER_API_KEYS` pool, the same bounded `min(keys, 3)` attempts,
-the same cooldown, and the same rule that a stream never switches keys after the
-first delta.
+**From selection to provider.** The reply flow resolves the model once per turn:
+
+```text
+session user → stored catalog key (or default) → active catalog entry
+  → entry.provider → ReplyProvider adapter → entry.modelIdentifier
+```
+
+`resolveReplyModelKey(userId)` gets the key from that authenticated user's existing
+preference, falling back according to the precedence above. `prepareReply` carries
+it alongside the typed `petContext` without changing or sending that context. The
+provider dispatcher in `src/server/ai/providers/index.ts` maps the entry's provider
+to an adapter; the chosen adapter independently re-checks that the key is active and
+belongs to *that* provider before it touches its isolated key pool. The client
+cannot select a provider separately from the catalog entry. Both the JSON path and
+the SSE path use this resolution, so a stream and a plain reply for the same key
+cannot disagree. Key rotation is independent of model choice *within* each
+provider: OpenRouter models still share the same `OPENROUTER_API_KEYS` pool; NVIDIA
+models share only the `NVIDIA_API_KEYS` pool, with the same bounded attempt and
+cooldown semantics.
 
 **Chat history is not affected.** No table, column, or row records which model
 produced a reply — the change applies to future generations only. A stored
@@ -765,12 +816,12 @@ src/
 │   ├── db/                # Lazy server-only Prisma client boundary
 │   ├── email/             # Server-only SMTP adapter for auth links
 │   └── ai/                # Server-only reply provider boundary
-│       ├── providers/     # OpenRouter adapter: request + stream parsing (no SDK)
-│       ├── key-pool/      # Round-robin key selection, cooldowns, bounded rotation
-│       ├── models/        # Server-owned catalog, preference service, read model
+│       ├── providers/     # Catalog dispatcher, OpenRouter + NVIDIA NIM adapters
+│       ├── key-pool/      # Provider-scoped round-robin rotation and cooldowns
+│       ├── models/        # Server-owned provider/model catalog and preferences
 │       └── pet-context.ts # Narrowed companion contract the AI layer may hold
 └── lib/                   # Reserved for shared, non-secret utilities
-prisma/                    # PostgreSQL schema and initial migration
+prisma/                    # PostgreSQL schema and model seed migrations
 tests/                    # Vitest unit tests and Playwright browser checks
 ```
 
@@ -800,11 +851,22 @@ assets or external font requests are used.
 
 ## Verification and tooling limitations
 
-The project passes `npm install`, lint, typecheck, **452 unit tests**, **72 Chromium
-browser tests**, and production build/start without real secrets, SMTP credentials,
-or a live database after client generation. **87 database checks** (13 streaming reply
+**Current Task 22 verification in this restricted sandbox:** `npm install` and
+`npm run lint` pass. The ordinary unit suite has **669 tests: 661 pass, 8 fail**;
+those eight are the same Prisma-client-stub failures as the pre-NVIDIA baseline of
+589 tests (581 pass, 8 fail), so the 80 added tests introduce no new failures.
+`npm run typecheck` still has the same 31 pre-existing Prisma-client errors, and
+production build cannot pass the type check until `prisma generate` succeeds. There
+is no `DATABASE_TEST_URL` to run the opt-in database suite, and Playwright cannot
+start its production server in this sandbox; those checks are **not** claimed as
+passed. NVIDIA unit and route tests use deterministic mocked providers and fetch,
+not a live NVIDIA key. None of these checks requires a NVIDIA credential.
+
+The following database and browser coverage was verified during earlier steps in an
+environment where the Prisma client and disposable PostgreSQL were available, not
+re-executed in this Task 22 sandbox: **87 database checks** (13 streaming reply
 + 16 reply + 9 message + 13 conversation + 9 settings + 6 pets + 9 model preference + 9 auth + 3 structure)
-pass against disposable PostgreSQL 17.6,
+against disposable PostgreSQL 17.6,
 including registration, duplicate-email rejection, session creation, expired
 verification tokens, single-use password reset, the conversation ownership matrix
 (owner-scoped list order, foreign/unknown ids answering the same 404, and deletion
@@ -947,12 +1009,18 @@ welcome state (with one accessible name, no live region, and no sideways overflo
 375px), a retried reply getting a clean reaction lifecycle of its own after a stream
 that died mid-answer, and leaving a conversation mid-generation settling the companion
 instead of leaving it thinking about a reply that will never arrive.
-No AI check reaches the network: the provider contract is covered by unit tests with a
-mocked `fetch`, the reply service and database suites mock the adapter module, and the
-browser suite talks to a local stub (`tests/e2e/mock-openrouter.mjs`) wired in through
-`OPENROUTER_BASE_URL`, which streams deterministic deltas. No real key is required in
-CI or locally. See the database documentation for the code-generation network
-limitation.
+No ordinary AI test reaches a live provider: both adapter contracts have unit
+coverage with a mocked `fetch`; route and reply-service tests mock the two adapters;
+and existing browser tests target a local OpenRouter stub
+(`tests/e2e/mock-openrouter.mjs`) wired through `OPENROUTER_BASE_URL`. NVIDIA route
+unit tests exercise the unchanged `delta`/`done`/`error` SSE wire format, a failed
+partial answer that writes no row, and a client-supplied provider or model that never
+reaches an adapter. NVIDIA provider tests cover the exact endpoint and body,
+`[DONE]`, fragmented SSE, malformed and upstream error frames, timeouts, aborts,
+network and HTTP failures, round-robin/quarantine/retry rules, no key switch after
+first delta, and isolation from the OpenRouter key pool even for identical test key
+strings. No real key is required in CI or locally; live NVIDIA output has not been
+verified. See the database documentation for the code-generation limitation.
 Browser layout checks cover 320, 375, 768, 1024, and 1440px widths, plus a 320×540
 viewport with a long draft, and every auth page at 375px and 1440px. An automated
 accessibility audit found no WCAG A/AA violations in the empty, static-conversation,
@@ -1005,9 +1073,11 @@ acceptance testing; those remain future verification work.
   server-owned **code** list, so adding a model is a code change plus one seed row —
   there is no admin UI, no provider-side model discovery, and no per-model settings
   (limits, pricing, or capability flags); `llama-3.1-70b` exists only to prove a
-  retired entry is never offered. NVIDIA support is still **not** implemented, and
-  there is no resume/reconnect: a dropped stream is retried by asking for a new
-  generation, not by continuing the old one.
+  retired entry is never offered. NVIDIA NIM is integrated through the same
+  catalog and reply flow, but no live NVIDIA request was made in this sandbox, so
+  provider-side behavior outside the documented OpenAI-compatible contract remains
+  unexercised. There is no resume/reconnect: a dropped stream is retried by asking
+  for a new generation, not by continuing the old one.
 
 ## License
 

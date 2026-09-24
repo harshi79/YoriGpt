@@ -136,16 +136,39 @@ describe("OpenRouter request construction", () => {
     expect(((await calls[0].clone().json()) as { model: string }).model).toBe("openai/gpt-4o");
   });
 
-  it("resolves every catalog key to its OpenRouter identifier", async () => {
+  it("resolves every OpenRouter catalog key to its identifier", async () => {
     configure();
     const calls = stubFetch(() => completion("ok"));
+    const own = MODEL_CATALOG.filter((entry) => entry.active && entry.provider === "openrouter");
+    expect(own.length).toBeGreaterThan(0);
 
-    for (const model of MODEL_CATALOG.filter((entry) => entry.active)) {
+    for (const model of own) {
       await generateReply([{ role: "user", content: "Hi" }], { model: model.key });
       expect(((await calls.at(-1)!.clone().json()) as { model: string }).model).toBe(
         model.modelIdentifier,
       );
     }
+  });
+
+  it("refuses a catalog key another provider serves, before any request", async () => {
+    configure();
+    const calls = stubFetch(() => completion("ok"));
+    const foreign = MODEL_CATALOG.find((entry) => entry.active && entry.provider !== "openrouter");
+    expect(foreign, "the catalog should offer a second provider").toBeDefined();
+
+    // The dispatcher never routes a foreign key here, but the adapter refuses it on
+    // its own too: a NVIDIA model can never be sent to OpenRouter, whatever picked
+    // the key. Like an unknown key, this is a programming error rather than a
+    // provider fault, so no key is spent and nothing is quarantined.
+    const caught = await generateReply(turns, { model: foreign!.key }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      `Model key served by another provider: ${foreign!.key} (${foreign!.provider}, not openrouter)`,
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it("uses the default model when the caller does not name one", async () => {

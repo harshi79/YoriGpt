@@ -90,6 +90,7 @@ describe("GET /api/models", () => {
       expect(serialized).not.toContain(model.modelIdentifier);
     }
     expect(serialized).not.toContain("OPENROUTER");
+    expect(serialized).not.toContain("NVIDIA");
     expect(serialized).not.toContain("ai_models");
   });
 
@@ -136,6 +137,33 @@ describe("PUT /api/models", () => {
     expect(fake.state.saved).toEqual([
       { userId: "cmuser00000000000000001", modelKey: "claude-3.5-haiku" },
     ]);
+  });
+
+  it("offers a NVIDIA model without exposing its identifier or accepting a provider override", async () => {
+    const nvidia = MODEL_CATALOG.find((model) => model.active && model.provider === "nvidia")!;
+    const list = (await (await GET()).json()) as {
+      models: { key: string; name: string }[];
+    };
+    expect(list.models).toContainEqual(expect.objectContaining({ key: nvidia.key, name: nvidia.name }));
+    expect(JSON.stringify(list)).not.toContain(nvidia.modelIdentifier);
+
+    const response = await PUT(put(JSON.stringify({ modelKey: nvidia.key })));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ selectedModelKey: nvidia.key });
+    expect(fake.state.saved).toEqual([{ userId: fake.state.user!.id, modelKey: nvidia.key }]);
+
+    // The client may name only the stable catalog key. It cannot supply the raw
+    // provider identifier, an invented model, or a provider alongside a valid key.
+    for (const candidate of [
+      { modelKey: nvidia.modelIdentifier },
+      { modelKey: "some-arbitrary-nvidia-model" },
+      { modelKey: nvidia.key, provider: "openrouter" },
+      { modelKey: "gpt-4o-mini", provider: "nvidia" },
+    ]) {
+      const rejected = await PUT(put(JSON.stringify(candidate)));
+      expect(rejected.status, JSON.stringify(candidate)).toBe(400);
+    }
+    expect(fake.state.saved).toHaveLength(1);
   });
 
   it("trims the key and rejects every other shape", async () => {

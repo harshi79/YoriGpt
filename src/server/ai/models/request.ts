@@ -2,7 +2,7 @@ import "server-only";
 
 /**
  * Strict parsing for the model-selection request. Exactly one field is accepted —
- * a catalog key — and everything else (an OpenRouter identifier, a provider name, a
+ * a catalog key — and everything else (a raw provider identifier, a provider name, a
  * `userId` override) is rejected instead of ignored. The key is only a *candidate*
  * here: the route and the service both re-check it against the server catalog.
  */

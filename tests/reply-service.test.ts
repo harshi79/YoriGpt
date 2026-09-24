@@ -101,8 +101,12 @@ vi.mock("../src/server/ai/providers/openrouter", () => ({
   openRouterProvider: { name: "openrouter", generateReply: vi.fn(), streamReply: vi.fn() },
   generateReply: vi.fn(),
 }));
+vi.mock("../src/server/ai/providers/nvidia", () => ({
+  nvidiaProvider: { name: "nvidia", generateReply: vi.fn(), streamReply: vi.fn() },
+}));
 
 const provider = await import("../src/server/ai/providers/openrouter");
+const nvidia = await import("../src/server/ai/providers/nvidia");
 const { AiNotConfiguredError, AiProviderError } = await import("../src/server/ai/errors");
 const {
   buildProviderTurns,
@@ -116,6 +120,8 @@ const userId = "cmuser00000000000000001";
 const conversationId = "cmconversation000000001";
 const generateReply = vi.mocked(provider.openRouterProvider.generateReply);
 const streamReply = vi.mocked(provider.openRouterProvider.streamReply);
+const generateNvidia = vi.mocked(nvidia.nvidiaProvider.generateReply);
+const streamNvidia = vi.mocked(nvidia.nvidiaProvider.streamReply);
 
 /** A row as Prisma would return it: timestamp columns are real `Date` objects. */
 type Row = {
@@ -384,6 +390,100 @@ describe("model selection for a reply", () => {
     await generateAssistantReply(userId, conversationId);
     expect(generateAssistantReply.length).toBe(2);
     expect(generateReply).toHaveBeenCalledWith(expect.anything(), { model: "gpt-4o" });
+  });
+});
+
+describe("provider selection for a reply", () => {
+  const chosen = "nvidia-llama-3.3-70b";
+
+  it("sends a NVIDIA-selected JSON reply to NVIDIA, not to OpenRouter", async () => {
+    models.state.key = chosen;
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    generateNvidia.mockResolvedValue("NVIDIA answer");
+
+    const result = await generateAssistantReply(userId, conversationId);
+
+    expect(generateNvidia).toHaveBeenCalledWith([{ role: "user", content: "Hello" }], {
+      model: chosen,
+    });
+    expect(generateReply).not.toHaveBeenCalled();
+    expect(fake.state.created).toEqual([
+      { conversationId, role: "ASSISTANT", content: "NVIDIA answer", position: 1 },
+    ]);
+    expect(result).toMatchObject({ ok: true, message: { content: "NVIDIA answer" } });
+    // The companion context was resolved for the user even though a second
+    // provider generated the text: Task 21's contract is not discarded.
+    expect(companion.state.resolvedFor).toEqual([{ id: userId }]);
+  });
+
+  it("streams NVIDIA deltas through the same reply events and persists once after done", async () => {
+    models.state.key = chosen;
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    streamNvidia.mockImplementation(async function* () {
+      yield { type: "delta", text: "First " };
+      yield { type: "delta", text: "second" };
+    });
+
+    const prepared = await prepareReply(userId, conversationId);
+    if (!prepared.ok) throw new Error("expected a prepared reply");
+    expect(prepared.modelKey).toBe(chosen);
+    expect(prepared.petContext).toBe(companion.state.context);
+    const signal = new AbortController().signal;
+    const events = [];
+    for await (const event of streamAssistantReply(userId, prepared, { signal })) events.push(event);
+
+    expect(streamNvidia).toHaveBeenCalledWith([{ role: "user", content: "Hello" }], {
+      model: chosen,
+      signal,
+    });
+    expect(streamReply).not.toHaveBeenCalled();
+    expect(events.slice(0, 2)).toEqual([
+      { type: "delta", text: "First " },
+      { type: "delta", text: "second" },
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "done", message: { content: "First second" } });
+    expect(fake.state.created).toEqual([
+      { conversationId, role: "ASSISTANT", content: "First second", position: 1 },
+    ]);
+    // Nothing about the context is passed to the adapter — just turns and key.
+    expect(Object.keys(streamNvidia.mock.calls[0][1] ?? {}).sort()).toEqual(["model", "signal"]);
+  });
+
+  it("stores no partial NVIDIA assistant row after a stream failure", async () => {
+    models.state.key = chosen;
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    fake.state.lastPosition = 0;
+    streamNvidia.mockImplementation(async function* () {
+      yield { type: "delta", text: "Partial" };
+      throw new AiProviderError("malformed-response");
+    });
+
+    const prepared = await prepareReply(userId, conversationId);
+    if (!prepared.ok) throw new Error("expected a prepared reply");
+    const events = [];
+    for await (const event of streamAssistantReply(userId, prepared)) events.push(event);
+
+    expect(events).toEqual([
+      { type: "delta", text: "Partial" },
+      { type: "failed", reason: "generation-failed" },
+    ]);
+    expect(fake.state.created).toEqual([]);
+    expect(streamReply).not.toHaveBeenCalled();
+  });
+
+  it("reports missing NVIDIA credentials without trying the OpenRouter adapter", async () => {
+    models.state.key = chosen;
+    fake.state.storedMessages = [message({ position: 0, role: "USER", content: "Hello" })];
+    generateNvidia.mockRejectedValue(new AiNotConfiguredError());
+
+    expect(await generateAssistantReply(userId, conversationId)).toEqual({
+      ok: false,
+      reason: "not-configured",
+    });
+    expect(generateReply).not.toHaveBeenCalled();
+    expect(fake.state.created).toEqual([]);
   });
 });
 

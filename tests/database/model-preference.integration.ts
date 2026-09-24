@@ -10,7 +10,7 @@ vi.mock("next/headers", () => ({ headers: async () => request.headers }));
 import { createAuth } from "../../src/server/auth/config";
 import { getDb } from "../../src/server/db/client";
 import { GET, PUT } from "../../src/app/api/models/route";
-import { DEFAULT_MODEL_KEY } from "../../src/server/ai/models/catalog";
+import { DEFAULT_MODEL_KEY, MODEL_CATALOG } from "../../src/server/ai/models/catalog";
 
 /**
  * Real Better Auth sessions + real PostgreSQL, driving the real model preference
@@ -94,13 +94,19 @@ afterAll(async () => {
 });
 
 describe("the seeded catalog rows", () => {
-  it("exist for every active catalog model, and for the retired one", async () => {
+  it("exist for every catalog model, with their provider and active status", async () => {
     const rows = await db.aiModel.findMany({ orderBy: { id: "asc" } });
     expect(rows.map((row) => row.id)).toContain(DEFAULT_MODEL_KEY);
-    for (const row of rows) {
-      expect(row.provider).toBe("OPENROUTER");
-      expect(row.modelIdentifier).toMatch(/^[a-z0-9-]+\/[A-Za-z0-9.:_-]+$/);
-      expect(row.displayName.trim().length).toBeGreaterThan(0);
+    for (const model of MODEL_CATALOG) {
+      const row = rows.find((candidate: { id: string }) => candidate.id === model.key);
+      expect(row, `seeded row for ${model.key}`).toBeDefined();
+      expect(row).toMatchObject({
+        id: model.key,
+        provider: model.provider.toUpperCase(),
+        modelIdentifier: model.modelIdentifier,
+        displayName: model.name,
+        isActive: model.active,
+      });
     }
   });
 
@@ -181,6 +187,23 @@ describe("changing a preference", () => {
     expect(bobRead.selectedModelKey).toBe("claude-3.5-haiku");
   });
 
+  it("stores a NVIDIA preference for one account through the foreign key", async () => {
+    const chosen = "nvidia-llama-3.3-70b";
+    const before = await db.userPreferences.findUnique({ where: { userId: bob.id } });
+    const response = await callUpdate(JSON.stringify({ modelKey: chosen }), {
+      cookie: alice.cookie,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ selectedModelKey: chosen });
+
+    const row = await db.userPreferences.findUniqueOrThrow({ where: { userId: alice.id } });
+    expect(row.preferredModelId).toBe(chosen);
+    expect(await db.userPreferences.findUnique({ where: { userId: bob.id } })).toEqual(before);
+    expect((await (await callList(alice.cookie)).json()) as { selectedModelKey: string }).toMatchObject(
+      { selectedModelKey: chosen },
+    );
+  });
+
   it("updates the existing row instead of adding another", async () => {
     await callUpdate(JSON.stringify({ modelKey: "claude-3.7-sonnet" }), { cookie: alice.cookie });
 
@@ -195,6 +218,8 @@ describe("changing a preference", () => {
       ["unknown model", JSON.stringify({ modelKey: "not-a-model" }), 400],
       ["retired model", JSON.stringify({ modelKey: "llama-3.1-70b" }), 400],
       ["raw identifier", JSON.stringify({ modelKey: "openai/gpt-4o" }), 400],
+      ["raw NVIDIA identifier", JSON.stringify({ modelKey: "meta/llama-3.3-70b-instruct" }), 400],
+      ["forged provider", JSON.stringify({ modelKey: "gpt-4o", provider: "nvidia" }), 400],
       ["malformed body", "{not json", 400],
       ["unexpected field", JSON.stringify({ modelKey: "gpt-4o", extra: true }), 400],
     ];
