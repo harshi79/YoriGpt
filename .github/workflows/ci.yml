@@ -62,4 +62,5 @@ jobs:
       # DATABASE_TEST_URL they would be skipped (Playwright reads it here).
       - run: npm run build
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+      # The GitHub reporter also emits failure annotations; the list remains for logs.
+      - run: npm run test:e2e -- --reporter=list,github
