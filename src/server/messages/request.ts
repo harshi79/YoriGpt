@@ -1,4 +1,5 @@
 import "server-only";
+import { readBoundedRequestBody } from "../api/request-body";
 
 /**
  * Strict parsing for user-message requests. `content` is the only field a client
@@ -33,12 +34,10 @@ export type ParsedCreateMessage =
 export async function parseCreateMessageRequest(
   request: Request,
 ): Promise<ParsedCreateMessage> {
-  const declaredLength = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_MESSAGE_BODY_BYTES)
-    return { ok: false, message: tooLongMessage() };
-
   const contentType = request.headers.get("content-type") ?? "";
-  const body = (await request.text()).trim();
+  const raw = await readBoundedRequestBody(request, MAX_MESSAGE_BODY_BYTES);
+  if (raw === null) return { ok: false, message: tooLongMessage() };
+  const body = raw.trim();
 
   if (body === "") return { ok: false, message: "Message content is required." };
   if (!contentType.toLowerCase().includes("application/json"))
@@ -79,6 +78,8 @@ function tooLongMessage() {
 }
 
 export type ParsedReplyRequest = { ok: true } | { ok: false; message: string };
+/** A reply carries no input fields; this allows harmless JSON whitespace only. */
+export const MAX_REPLY_REQUEST_BYTES = 4_096;
 
 /**
  * Reads the reply request. Generation is initiated by the URL alone, so the body
@@ -86,7 +87,9 @@ export type ParsedReplyRequest = { ok: true } | { ok: false; message: string };
  * `content`, or `position` — is rejected rather than ignored.
  */
 export async function parseReplyRequest(request: Request): Promise<ParsedReplyRequest> {
-  const body = (await request.text()).trim();
+  const raw = await readBoundedRequestBody(request, MAX_REPLY_REQUEST_BYTES);
+  if (raw === null) return { ok: false, message: "That request is too large." };
+  const body = raw.trim();
   if (body === "") return { ok: true };
 
   let value: unknown;

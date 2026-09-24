@@ -1,4 +1,5 @@
 import "server-only";
+import { readBoundedRequestBody } from "../api/request-body";
 import { DEFAULT_CONVERSATION_TITLE } from "./service";
 
 /**
@@ -9,6 +10,8 @@ import { DEFAULT_CONVERSATION_TITLE } from "./service";
 
 /** Matches the `VarChar(200)` length of `conversations.title`. */
 export const MAX_TITLE_LENGTH = 200;
+/** More than enough for a 200-character JSON title, including four-byte characters. */
+export const MAX_CONVERSATION_REQUEST_BYTES = 4_096;
 
 /**
  * Loose shape check for a conversation id (Prisma generates CUIDs). This is a
@@ -34,7 +37,8 @@ export async function parseCreateConversationRequest(
   request: Request,
 ): Promise<ParsedCreateConversation> {
   const contentType = request.headers.get("content-type") ?? "";
-  const raw = await request.text();
+  const raw = await readBoundedRequestBody(request, MAX_CONVERSATION_REQUEST_BYTES);
+  if (raw === null) return { ok: false, message: "That request is too large." };
   const body = raw.trim();
 
   if (body === "") return { ok: true, title: DEFAULT_CONVERSATION_TITLE };

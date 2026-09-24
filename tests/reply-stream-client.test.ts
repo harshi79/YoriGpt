@@ -108,6 +108,17 @@ describe("browser streaming reply requests", () => {
     expect(result).toEqual({ ok: true, value: stored });
   });
 
+  it("recognizes a done event when CRLF is split between the event and data lines", async () => {
+    const wire = done.replaceAll("\n", "\r\n");
+    const split = wire.indexOf("\r\n");
+    stubFetch(() => sseResponse([wire.slice(0, split + 1), wire.slice(split + 1)]));
+
+    expect(await requestAssistantReplyStream(conversationId, { onDelta: () => {} })).toEqual({
+      ok: true,
+      value: stored,
+    });
+  });
+
   it("keeps the server's message and code when generation fails mid-stream", async () => {
     stubFetch(() =>
       sseResponse([
@@ -170,6 +181,18 @@ describe("browser streaming reply requests", () => {
     );
     const notAStream = await requestAssistantReplyStream(conversationId, { onDelta: () => {} });
     expect(notAStream.ok).toBe(false);
+  });
+
+  it("does not report success if an abort races with an already buffered done", async () => {
+    const controller = new AbortController();
+    stubFetch(() => sseResponse([delta("Provisional text") + done]));
+
+    const result = await requestAssistantReplyStream(
+      conversationId,
+      { onDelta: () => controller.abort() },
+      { signal: controller.signal },
+    );
+    expect(result).toMatchObject({ ok: false, aborted: true });
   });
 
   it("stops reading when the caller aborts and reports no failure to the user", async () => {

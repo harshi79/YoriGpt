@@ -80,9 +80,10 @@ Playwright starts the production server on port 3100. Set `DATABASE_TEST_URL` to
 disposable migrated database (the same variable as `npm run test:db`) to enable the
 four signed-in conversation checks; without it they are skipped and the rest of the
 suite still runs. On restricted development machines,
-`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing Chromium binary instead. The normal browser download was blocked in this sandbox; checks
-were completed with a separately installed Chromium executable, outside the
-project dependencies. Browser binaries and screenshots are not committed.
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing Chromium binary instead.
+Browser checks completed in an earlier environment with a separately installed
+Chromium; no browser executable was available for Task 24. Browser binaries and
+screenshots are not committed.
 
 ## Visual application shell
 
@@ -213,12 +214,13 @@ accounts and sessions keep working. See
 ## Database foundation
 
 The PostgreSQL schema defines `User`, `Session`, `Account`, `Verification`,
-`Conversation`, `Message`, `AiModel`, and `UserPreferences`, with two reviewed
-migrations (foundation and Better Auth) and a lazy server-only client in
-`src/server/db/client.ts`. The chat UI reads and writes `conversations` and the
-owner's `messages` through the server-side services; `ai_models` and
-`user_preferences` remain unused. There are no seed records, session-token
-fixtures, or demo conversations.
+`Conversation`, `Message`, `AiModel`, and `UserPreferences`, with foundation and
+auth migrations plus two catalog seed migrations and a lazy server-only client in
+`src/server/db/client.ts`. The server reads and writes owned conversations and
+messages; `ai_models` contains seeded catalog rows, and `user_preferences` stores
+the account's model, theme, and pet keys. Provider API keys, demo conversations,
+pet reactions, and personality instructions are not stored; Better Auth separately
+stores password hashes and sessions in its own tables.
 
 Prisma CLI, client, and PostgreSQL adapter are pinned at **6.19.3**. Run
 `npm run db:generate` after installation and schema changes; this needs only a
@@ -276,9 +278,12 @@ transaction that first updates the parent conversation (activity timestamp for t
 sidebar order) — the row lock serializes concurrent writers, and the
 `(conversationId, position)` unique constraint turns any remaining race into a
 retry instead of a duplicate position. Invalid or oversized input is rejected, never
-truncated. `GET` returns the stored messages in ascending position order, capped at
-500 with a `truncated` flag. There is no role, admin, bulk, or assistant-message
-authorization, and no message editing or deletion yet.
+truncated. The app-owned conversation, message, reply, model, pet, and settings
+write parsers bound incoming bytes before trimming or parsing, even if
+`Content-Length` is absent or inaccurate; a large padded `{}` cannot start a reply
+or save a setting. `GET` returns the stored messages in ascending
+position order, capped at 500 with a `truncated` flag. There is no role, admin, bulk,
+or assistant-message authorization, and no message editing or deletion yet.
 
 ## Assistant replies (OpenRouter and NVIDIA NIM)
 
@@ -304,10 +309,11 @@ Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
 
 - `src/server/ai/providers/index.ts` dispatches from the **selected catalog key**
   to its entry's provider, and then to exactly one adapter. No browser request can
-  supply a separate provider. The OpenRouter adapter is unchanged except for a
-  documentation comment; `src/server/ai/providers/nvidia.ts` implements the same
+  supply a separate provider. OpenRouter and NVIDIA implement the same
   `ReplyProvider` interface without moving orchestration, database logic, or pet
-  context into either adapter.
+  context into either adapter. OpenRouter remains the default; its adapter now also
+  rejects upstream error frames, bounds non-streamed response reads, and discards
+  untrusted network error causes that could echo a key.
 - Each adapter calls its official OpenAI-compatible
   `POST {baseUrl}/chat/completions` with exactly `{ model, messages, stream }`:
   the `model` identifier comes from that provider's catalog entry, never from a
@@ -337,14 +343,15 @@ Generation lives in `src/server/ai/` and `src/server/messages/reply.ts`:
   without quarantining it; a non-retryable response, timeout, abort, or an answer
   that has emitted its first delta cannot rotate. Key values never reach a log
   line, SSE event, error message, or client bundle.
-- Each adapter owns its upstream SSE framing. NVIDIA handles frames split across
+- Each adapter owns its upstream SSE framing. Both handle frames split across
   reads (including CRLF and UTF-8 splits), keep-alives, empty and usage-only chunks,
   `data: [DONE]`, and a `finish_reason` marker, forwarding only
   `{ type: "delta", text }` to the reply service. A malformed chunk, explicit
-  upstream error frame, `finish_reason: "error"`, or truncated stream is a failure,
-  never a finished answer. Aborting the request cancels the upstream read even if
-  the fetch runtime leaves a body pending. No provider payload reaches the route
-  or browser; the browser always sees the same `delta`, `done`, and `error` events.
+  upstream error frame, `finish_reason: "error"`, or interrupted stream is a
+  failure, never a finished answer. Aborting the request cancels the upstream read
+  even if the fetch runtime leaves a body pending. No provider payload reaches the
+  route or browser; the browser always sees the same `delta`, `done`, and `error`
+  events.
 - `reply.ts` builds history from the **stored** rows only: newest at most 40 turns
   within 24,000 characters, mapping `USER` → `user` and `ASSISTANT` → `assistant`,
   never accepting a stored `SYSTEM` row as an instruction. It prepends one trusted
@@ -882,17 +889,18 @@ assets or external font requests are used.
 
 ## Verification and tooling limitations
 
-**Current Task 23 verification in this restricted sandbox:** `npm install` and
-`npm run lint` pass. The focused pet/chat/provider regressions pass **439/439**.
-The ordinary unit suite has **686 tests: 678 pass, 8 fail**; those eight are the
-same Prisma-client-stub failures as the pre-Task-23 baseline of 669 tests
-(661 pass, 8 fail), so the 17 added tests introduce no new failures.
-`npm run typecheck` still has the same 31 pre-existing Prisma-client errors, and
-production build cannot pass the type check until `prisma generate` succeeds. There
-is no `DATABASE_TEST_URL` to run the opt-in database suite; Playwright cannot start
-its production server here. Those checks are **not** claimed as passed. Both
-providers' request-shape and reply-path tests use deterministic stubs and require
-no real API key; no live personality-aware model output is claimed.
+**Task 24 verification in this restricted sandbox (2026-09-24):** `npm ci`,
+`npm run lint`, and — after generating the ignored Prisma client with a *temporary*
+config using Prisma's bundled WASM schema engine — `npm test` (704/704),
+`npm run typecheck`, and `npm run build` pass. The unchanged native
+`npm run db:generate` still fails downloading its engine checksum due to a TLS
+disconnect. Before the temporary generation, `npm test` reproduced the eight known
+Prisma-stub failures (678/686 passed), and typecheck/build showed the same 31
+Prisma-client errors. The WASM config was removed after generation; no schema,
+dependency, or runtime configuration was changed. A mocked route-to-provider-to-SSE
+smoke test passes for OpenRouter rotation/failure and NVIDIA JSON, but no live provider
+was called. `DATABASE_TEST_URL` is unset; Playwright lists 81 tests but no browser
+executable is available, so neither DB integration nor Playwright was run for Task 24.
 
 The following database and browser coverage was verified during earlier steps in an
 environment where the Prisma client and disposable PostgreSQL were available, not
@@ -1080,26 +1088,22 @@ acceptance testing; those remain future verification work.
   generation succeeded via a temporary WASM config, and migration SQL was accepted
   by PostgreSQL. Prisma-managed deployment/history remains unverified. See
   [the database verification report](docs/database.md#what-was-actually-verified-in-this-sandbox).
-- **The Playwright suite cannot execute here, and was not executed for the pet
-  reaction lifecycle work.** `prisma generate` still fails on TLS to
-  `binaries.prisma.sh`, so `@prisma/client` is a stub: `npm run build` fails its own
-  type check, `npm start` then reports "Could not find a production build in the
-  `.next` directory", and the suite's `webServer` never comes up. Every route also
-  500s under `next dev` for the same reason (`@prisma/client did not initialize
-  yet`), so no page — not even the public `/pets` — could be inspected in a browser.
-  Browser binaries cannot be fetched either (`cdn.playwright.dev` is unreachable).
-  The browser checks for the companion lifecycle are written and parse
-  (`npx playwright test --list` counts them), but they are **unverified**: they need a
-  working `prisma generate` plus `DATABASE_TEST_URL`, like the rest of the signed-in
-  suite. The equivalent behavior is covered by the jsdom suites, which do run.
-- Streaming replies were verified against a real browser and the local stub
+- **Task 24 did not run the browser or database suites.** The native Prisma CLI
+  still cannot download its schema engine; the temporary WASM generation described
+  above enabled a passing production build but did not provide a disposable
+  PostgreSQL database or a Chromium executable. `npx playwright test --list` finds
+  81 browser tests, not proof that they execute. A migrated `DATABASE_TEST_URL` is
+  required for the signed-in checks; the public-page checks also need Chromium.
+  The mocked in-process smoke and jsdom lifecycle suites run without either.
+- Earlier development verified streaming in a real browser against the local stub
   (incremental delivery measured end to end, several deltas rendered before the
-  stored row arrived), but never against the real OpenRouter service: the sandbox
-  holds no credentials, so live model output, provider-side rate limits, and any
-  provider-specific framing outside the documented OpenAI-compatible shape remain
-  unexercised. Key rotation is covered by unit tests with a mocked `fetch` and by a
-  browser test against the local stub (which refuses one attempt so the fallback key is
-  observable on the wire), but a real OpenRouter rate limit or revoked key was never
+  stored row arrived); that browser test was not rerun for Task 24. No real OpenRouter
+  service was called: the sandbox holds no credentials, so live model output,
+  provider-side rate limits, and any provider-specific framing outside the documented
+  OpenAI-compatible shape remain unexercised. Key rotation is covered by unit tests
+  with a mocked `fetch`, a mocked Task 24 end-to-end smoke, and a browser test written
+  for the local stub (which refuses one attempt so the fallback key is observable on
+  the wire), but a real OpenRouter rate limit or revoked key was never
   seen here, so the exact cooldown that suits live provider limits may need tuning;
   provider-side `Retry-After` is deliberately not read. The model catalog is a
   server-owned **code** list, so adding a model is a code change plus one seed row —

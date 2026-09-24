@@ -118,14 +118,15 @@ function requestSignals(options: GenerateReplyOptions): Signals {
  * cancellation. A caller abort is then recognised from the signal as well as from
  * the error, because a cancelled body read surfaces as a plain stream failure
  * (`TypeError: terminated`) rather than an `AbortError` — a browser navigating away
- * must not be filed as a provider network fault. Nothing but the outcome is
- * inspected: no message text, no body.
+ * must not be filed as a provider network fault. Only the outcome is retained:
+ * fetch/body-read errors can echo credentials or prompt text and must not become
+ * an enumerable provider-error cause.
  */
 function mapFetchFailure(error: unknown, signals: Signals): AiProviderError {
-  if (signals.timeout.aborted) return new AiProviderError("timeout", { cause: error });
+  if (signals.timeout.aborted) return new AiProviderError("timeout");
   if (signals.request.aborted || (error instanceof Error && error.name === "AbortError"))
-    return new AiProviderError("aborted", { cause: error });
-  return new AiProviderError("network-error", { cause: error });
+    return new AiProviderError("aborted");
+  return new AiProviderError("network-error");
 }
 
 /**
@@ -141,8 +142,10 @@ async function postChatCompletions(
   signals: Signals,
   stream: boolean,
 ): Promise<Response> {
+  if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
+  let response: Response;
   try {
-    return await fetch(chatCompletionsUrl(config.baseUrl), {
+    response = await fetch(chatCompletionsUrl(config.baseUrl), {
       method: "POST",
       headers: {
         // The key exists only in this header, on the server, for this one attempt.
@@ -157,6 +160,13 @@ async function postChatCompletions(
   } catch (error) {
     throw mapFetchFailure(error, signals);
   }
+  // A gateway may return a response even after cancellation. Do not accept it or
+  // turn its status into a key-specific retry.
+  if (signals.request.aborted) {
+    void response.body?.cancel().catch(() => {});
+    throw mapFetchFailure(signals.request.reason, signals);
+  }
+  return response;
 }
 
 /** A non-2xx answer is reported by status only; the body may echo provider input. */
@@ -196,7 +206,7 @@ function failureAction(error: AiProviderError): FailureAction {
 function asProviderFailure(error: unknown): AiProviderError {
   return error instanceof AiProviderError
     ? error
-    : new AiProviderError("network-error", { cause: error });
+    : new AiProviderError("network-error");
 }
 
 /**
@@ -211,34 +221,76 @@ function unavailableKeyError(pool: KeyPool, label: string): AiProviderError {
   return new AiProviderError("http-error", { status: pool.lastStatus });
 }
 
-/** Only `choices[0].message.content` is of interest; everything else is ignored. */
+/** Only a successful `choices[0].message.content` can become an answer. */
 function readAssistantContent(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const choices = (payload as { choices?: unknown }).choices;
+  const result = payload as { choices?: unknown; error?: unknown };
+  // A gateway may send a 200 with an error object alongside provisional text.
+  if (result.error != null) return null;
+  const choices = result.choices;
   if (!Array.isArray(choices) || choices.length === 0) return null;
   const first = choices[0];
   if (typeof first !== "object" || first === null) return null;
-  const content = (first as { message?: { content?: unknown } }).message?.content;
+  const choice = first as { message?: { content?: unknown }; finish_reason?: unknown };
+  if (choice.finish_reason === "error") return null;
+  const content = choice.message?.content;
   return typeof content === "string" ? content : null;
 }
 
-/**
- * Reads a non-streamed answer. Bounded by `MAX_RESPONSE_BYTES` before parsing, and
- * the body is never logged or forwarded.
- */
-async function readJsonReply(response: Response): Promise<string> {
+/** Limit JSON bytes *as they arrive*, rather than buffering a whole response first. */
+async function readBoundedJsonText(response: Response, signals: Signals): Promise<string> {
+  const body = response.body;
+  if (!body) throw new AiProviderError("malformed-response");
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  // A mocked gateway may ignore the fetch signal and leave a body read pending.
+  const abortRead = () => { void reader.cancel().catch(() => {}); };
+  signals.request.addEventListener("abort", abortRead, { once: true });
+
+  try {
+    for (;;) {
+      if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        throw mapFetchFailure(error, signals);
+      }
+      if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        console.error("[openrouter] Reply response exceeded the accepted size.");
+        throw new AiProviderError("malformed-response");
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    signals.request.removeEventListener("abort", abortRead);
+    reader.releaseLock();
+    void body.cancel().catch(() => {});
+  }
+
+  if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
+  const joined = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
+/** Reads a non-streamed answer; upstream bodies and parser errors never reach logs. */
+async function readJsonReply(response: Response, signals: Signals): Promise<string> {
+  const text = await readBoundedJsonText(response, signals);
   let payload: unknown;
   try {
-    const text = await response.text();
-    if (text.length > MAX_RESPONSE_BYTES) {
-      console.error("[openrouter] Reply response exceeded the accepted size.");
-      throw new AiProviderError("malformed-response");
-    }
     payload = JSON.parse(text);
-  } catch (error) {
-    if (error instanceof AiProviderError) throw error;
+  } catch {
     console.error("[openrouter] Reply response was not valid JSON.");
-    throw new AiProviderError("malformed-response", { cause: error });
+    throw new AiProviderError("malformed-response");
   }
 
   const content = readAssistantContent(payload);
@@ -260,20 +312,44 @@ async function readJsonReply(response: Response): Promise<string> {
  * arrive on this path when a gateway ignores `stream: true`.
  */
 function readChunk(payload: unknown): { text: string; finished: boolean } {
-  if (typeof payload !== "object" || payload === null) return { text: "", finished: false };
-  const choices = (payload as { choices?: unknown }).choices;
-  if (!Array.isArray(choices) || choices.length === 0) return { text: "", finished: false };
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload))
+    throw new AiProviderError("malformed-response");
+  const result = payload as { choices?: unknown; error?: unknown };
+  // A 200 stream can still contain an error frame after provisional deltas. Never
+  // mistake a following [DONE] for confirmation that those deltas are a reply.
+  if (result.error != null) {
+    console.error("[openrouter] Streaming reply contained a provider error frame.");
+    throw new AiProviderError("malformed-response");
+  }
+  if (!Array.isArray(result.choices)) throw new AiProviderError("malformed-response");
+  // Usage-only frames carry no answer and are safe to ignore.
+  if (result.choices.length === 0) return { text: "", finished: false };
 
-  const first = choices[0];
-  if (typeof first !== "object" || first === null) return { text: "", finished: false };
+  const first = result.choices[0];
+  if (typeof first !== "object" || first === null || Array.isArray(first))
+    throw new AiProviderError("malformed-response");
   const choice = first as {
     delta?: { content?: unknown };
     message?: { content?: unknown };
     finish_reason?: unknown;
   };
+  if (choice.finish_reason === "error") {
+    console.error("[openrouter] Streaming reply ended with a provider error.");
+    throw new AiProviderError("malformed-response");
+  }
+  if (
+    (choice.delta !== undefined &&
+      (typeof choice.delta !== "object" || choice.delta === null || Array.isArray(choice.delta))) ||
+    (choice.message !== undefined &&
+      (typeof choice.message !== "object" || choice.message === null || Array.isArray(choice.message))) ||
+    (choice.finish_reason !== undefined && choice.finish_reason !== null && typeof choice.finish_reason !== "string") ||
+    (choice.delta === undefined && choice.message === undefined && !choice.finish_reason)
+  ) throw new AiProviderError("malformed-response");
 
   const delta = choice.delta?.content;
   const message = choice.message?.content;
+  if ((delta != null && typeof delta !== "string") || (message != null && typeof message !== "string"))
+    throw new AiProviderError("malformed-response");
   const text = typeof delta === "string" ? delta : typeof message === "string" ? message : "";
   // A final chunk may carry only `finish_reason`; that is a valid completion marker
   // for providers that close the stream without `[DONE]`.
@@ -308,15 +384,16 @@ type FrameResult = { kind: "none" } | { kind: "data"; text: string; done: boolea
 
 function applyFrame(frame: string): FrameResult {
   const data = readEventData(frame);
-  if (data === null) return { kind: "none" };
+  if (data === null || data === "") return { kind: "none" };
   if (data === STREAM_DONE) return { kind: "data", text: "", done: true };
 
   let payload: unknown;
   try {
     payload = JSON.parse(data);
-  } catch (error) {
+  } catch {
+    // SyntaxError messages can quote upstream data (including an echoed key).
     console.error("[openrouter] Streaming reply contained an unreadable chunk.");
-    throw new AiProviderError("malformed-response", { cause: error });
+    throw new AiProviderError("malformed-response");
   }
 
   const { text, finished } = readChunk(payload);
@@ -354,9 +431,14 @@ async function* streamReplyOnce(
   let text = "";
   let complete = false;
   let finishedReading = false;
+  // Abort even when a gateway/fetch double ignores the request signal while a
+  // body read is pending; otherwise a cancelled or timed-out stream could hang.
+  const abortRead = () => { void reader.cancel().catch(() => {}); };
+  signals.request.addEventListener("abort", abortRead, { once: true });
 
   try {
     while (!complete) {
+      if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
       // Take the next complete frame, reading more of the body only when the
       // buffer does not hold one yet. This keeps delivery incremental: a delta is
       // yielded as soon as its frame arrives, never after the whole answer.
@@ -370,7 +452,8 @@ async function* streamReplyOnce(
         }
         if (finishedReading) {
           // A provider may close without a trailing blank line; the remaining
-          // text is still a complete event.
+          // text is still a complete event. A lone CR is a line break too.
+          buffer = buffer.replace(/\r$/, "\n");
           if (buffer.trim() !== "") {
             frame = buffer;
             buffer = "";
@@ -384,8 +467,10 @@ async function* streamReplyOnce(
         } catch (error) {
           throw mapFetchFailure(error, signals);
         }
+        if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
         if (chunk.done) {
           finishedReading = true;
+          buffer += decoder.decode();
           continue;
         }
 
@@ -395,13 +480,14 @@ async function* streamReplyOnce(
           throw new AiProviderError("too-long");
         }
 
-        // Normalizing line endings here keeps frames that are split across chunks
-        // (including a CRLF split over two reads) intact.
+        // Leave a trailing CR unresolved until the next read: a following LF is
+        // part of the same line ending, not a second blank line/frame.
         buffer += decoder.decode(chunk.value, { stream: true });
-        buffer = buffer.replace(/\r\n?/g, "\n");
+        buffer = buffer.replace(/\r\n/g, "\n").replace(/\r(?!$)/g, "\n");
       }
 
       if (frame === null) break;
+      if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
 
       const result = applyFrame(frame);
       if (result.kind === "none") continue;
@@ -420,10 +506,12 @@ async function* streamReplyOnce(
     // cancel below stops the provider connection when this generator is abandoned
     // — a client that disconnected, or a caller that stopped iterating — instead
     // of leaving it open until the provider finishes on its own.
+    signals.request.removeEventListener("abort", abortRead);
     reader.releaseLock();
     void body.cancel().catch(() => {});
   }
 
+  if (signals.request.aborted) throw mapFetchFailure(signals.request.reason, signals);
   if (!complete) {
     console.error("[openrouter] Streaming reply ended before a completion marker.");
     throw new AiProviderError("malformed-response");
@@ -499,13 +587,7 @@ async function generateReplyOnce(
   const response = await postChatCompletions(config, key, model, turns, signals, false);
   assertOk(response, "Reply");
 
-  try {
-    return await readJsonReply(response);
-  } catch (error) {
-    // A body that fails mid-read (timeout, disconnect) is still a provider failure.
-    if (error instanceof AiProviderError) throw error;
-    throw new AiProviderError("network-error", { cause: error });
-  }
+  return readJsonReply(response, signals);
 }
 
 /**

@@ -74,23 +74,34 @@ export async function readReplyStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let finished = false;
+  const cancelled = (): ReplyStreamOutcome => ({
+    ok: false, message: STREAM_INTERRUPTED_MESSAGE, aborted: true,
+  });
+  // A fetch double or gateway can leave a read pending after an abort. Cancel the
+  // body ourselves, and never promote buffered events to success after cancellation.
+  const abortRead = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener("abort", abortRead, { once: true });
 
   try {
-    while (!finished) {
+    for (;;) {
+      if (signal?.aborted) return cancelled();
       let chunk: ReadableStreamReadResult<Uint8Array>;
       try {
         chunk = await reader.read();
       } catch {
         return { ok: false, message: STREAM_INTERRUPTED_MESSAGE, aborted: signal?.aborted };
       }
+      if (signal?.aborted) return cancelled();
       if (chunk.done) return { ok: false, message: STREAM_INTERRUPTED_MESSAGE };
 
       buffer += decoder.decode(chunk.value, { stream: true });
-      buffer = buffer.replace(/\r\n?/g, "\n");
+      // A CR at the end of this read may be the first half of a CRLF. Converting
+      // it now would invent an empty line when the LF arrives in the next read.
+      buffer = buffer.replace(/\r\n/g, "\n").replace(/\r(?!$)/g, "\n");
 
       let boundary = buffer.indexOf("\n\n");
       while (boundary !== -1) {
+        if (signal?.aborted) return cancelled();
         const frame = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
 
@@ -109,8 +120,7 @@ export async function readReplyStream(
           } else if (parsed.event === REPLY_STREAM_EVENTS.done) {
             const message = (payload as { message?: unknown })?.message;
             if (!isMessageSummary(message)) return { ok: false, message: STREAM_UNREADABLE_MESSAGE };
-            finished = true;
-            return { ok: true, message };
+            return signal?.aborted ? cancelled() : { ok: true, message };
           } else if (parsed.event === REPLY_STREAM_EVENTS.error) {
             const error = payload as { code?: unknown; message?: unknown };
             return {
@@ -131,9 +141,8 @@ export async function readReplyStream(
   } finally {
     // Stop the connection when the reader left early (an `error` event, a broken
     // frame, or a caller that gave up) instead of leaving it half-open.
+    signal?.removeEventListener("abort", abortRead);
     reader.releaseLock();
     void body.cancel().catch(() => {});
   }
-
-  return { ok: false, message: STREAM_INTERRUPTED_MESSAGE };
 }

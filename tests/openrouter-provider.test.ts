@@ -330,6 +330,20 @@ describe("OpenRouter failures", () => {
     expect(error.message).not.toContain("invalid key");
   });
 
+  it("refuses a 200 provider error even when it also contains assistant text", async () => {
+    configure();
+    stubFetch(() =>
+      new Response(JSON.stringify({
+        error: { message: `failed for ${KEY}` },
+        choices: [{ message: { content: "Incomplete answer" }, finish_reason: "error" }],
+      })),
+    );
+
+    const error = await failureOf(generateReply(turns));
+    expect(error.reason).toBe("malformed-response");
+    expect(JSON.stringify(error)).not.toContain(KEY);
+  });
+
   it("treats malformed and empty responses as failures", async () => {
     configure();
 
@@ -345,6 +359,16 @@ describe("OpenRouter failures", () => {
     expect((await failureOf(generateReply(turns))).reason).toBe("empty-response");
   });
 
+  it("enforces the JSON size limit while reading, without buffering via Response.text", async () => {
+    configure();
+    const response = new Response(new Uint8Array(1_000_001));
+    const readWholeBody = vi.spyOn(response, "text");
+    stubFetch(() => response);
+
+    expect((await failureOf(generateReply(turns))).reason).toBe("malformed-response");
+    expect(readWholeBody).not.toHaveBeenCalled();
+  });
+
   it("reports a network failure without leaking the key", async () => {
     configure();
     vi.stubGlobal("fetch", async () => {
@@ -354,6 +378,18 @@ describe("OpenRouter failures", () => {
     const error = await failureOf(generateReply(turns));
     expect(error.reason).toBe("network-error");
     expect(String(error)).not.toContain(KEY);
+  });
+
+  it("does not retain a network cause that could echo the provider key", async () => {
+    configure();
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError(`failed for ${KEY}`);
+    });
+
+    const error = await failureOf(generateReply(turns));
+    expect(error.reason).toBe("network-error");
+    expect(error.cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(KEY);
   });
 
   it("never puts the key in a provider error message", async () => {
@@ -692,6 +728,17 @@ describe("OpenRouter streaming requests", () => {
     expect(deltas.map((delta) => delta.text).join("")).toBe(`Partial ${emoji}`);
   });
 
+  it("keeps a CRLF split across reads inside one multi-line SSE frame", async () => {
+    configure();
+    stubFetch(() => streamedResponse([
+      'data: {"choices":[{"delta":\r',
+      '\ndata: {"content":"From one frame"}}]}\r\n\r\n',
+      STREAM_DONE,
+    ]));
+
+    expect((await collect(streamReply(turns))).map((delta) => delta.text)).toEqual(["From one frame"]);
+  });
+
   it("normalizes deltas so no provider field escapes the adapter", async () => {
     configure();
     stubFetch(() => streamedResponse([chunkFrame("A"), chunkFrame("B"), STREAM_DONE]));
@@ -724,6 +771,34 @@ describe("OpenRouter streaming requests", () => {
 });
 
 describe("OpenRouter streaming failures", () => {
+  it("does not turn an upstream error frame followed by [DONE] into a stored reply", async () => {
+    configure({ keys: `${KEY},another-test-key` });
+    const calls = stubFetch(() =>
+      streamedResponse([
+        chunkFrame("Provisional text"),
+        `data: ${JSON.stringify({ error: { message: `failed for ${KEY}` } })}\n\n`,
+        STREAM_DONE,
+      ]),
+    );
+    const deltas: string[] = [];
+    const error = await collectFailure(async () => {
+      for await (const chunk of streamReply(turns)) deltas.push(chunk.text);
+    });
+
+    expect(deltas).toEqual(["Provisional text"]);
+    expect(error.reason).toBe("malformed-response");
+    expect(JSON.stringify(error)).not.toContain(KEY);
+    expect(calls).toHaveLength(1); // never rotate after a delta
+  });
+
+  it("does not treat a finish_reason of error as successful completion", async () => {
+    configure();
+    stubFetch(() => streamedResponse([chunkFrame("Provisional"), chunkFrame("", { finish_reason: "error" })]));
+
+    const error = await failureOf(collect(streamReply(turns)));
+    expect(error.reason).toBe("malformed-response");
+  });
+
   it("refuses to treat a stream without a completion marker as an answer", async () => {
     configure();
     stubFetch(() => streamedResponse([chunkFrame("Cut off halfway")]));

@@ -2,10 +2,11 @@
 
 ## Scope and version decision
 
-This step adds schema, migration SQL, generated-client configuration and the
-server database boundary only. No authentication library, accounts/sessions,
-passwords, credentials, API handlers, application queries, seeds, or UI/database
-connection have been added.
+The initial data-foundation step added the schema, migration SQL, client
+configuration, and server database boundary. Subsequent tasks added Better Auth,
+conversation/message services, catalog seed migrations, settings, pets, and
+provider-backed replies. The original foundation migration contains no application
+seed rows; the two later seed migrations populate `ai_models`.
 
 Prisma CLI, `@prisma/client`, and `@prisma/adapter-pg` are pinned together at
 **6.19.3**, the latest available 6.x patch at inspection. Node 22.22.3 is compatible.
@@ -251,7 +252,8 @@ are not represented as proof of concurrent transaction behavior.
 
 CI has a separate disposable PostgreSQL 17 service job for the standard native
 migration lifecycle: clean deploy, second deploy, status, schema diff, and these
-read-only checks. That workflow has been configured, **not run remotely here**.
+integration checks (which write and clean up test rows). That workflow was configured
+in the foundation step; this document does not claim it ran in the Task 24 sandbox.
 
 ## What was actually verified in this sandbox
 
