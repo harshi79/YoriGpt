@@ -14,6 +14,35 @@ describe("server environment configuration", () => {
     expect(getServerEnv("app")).toEqual({ APP_URL: "https://yorigpt.example" });
   });
 
+  it("reports a missing or blank APP_URL as unset, not as an invalid URL", () => {
+    // The production symptom: `next start` without a usable APP_URL (the file was
+    // never copied, or a platform injected an empty value) surfaced as a bare
+    // "Invalid URL", which names neither the variable nor the mistake.
+    vi.stubEnv("APP_URL", undefined);
+    expect(() => getServerEnv("app")).toThrow(/app.*APP_URL/);
+    expect(() => getServerEnv("app")).toThrow(/APP_URL: is not set/);
+    vi.stubEnv("APP_URL", "");
+    expect(() => getServerEnv("app")).toThrow(/APP_URL: is blank/);
+    vi.stubEnv("APP_URL", "   ");
+    expect(() => getServerEnv("app")).toThrow(/APP_URL: is blank/);
+  });
+
+  it("names the expected format when APP_URL is not an absolute http(s) URL", () => {
+    // A bare host is the common deployment mistake; it must not read as "Invalid URL".
+    vi.stubEnv("APP_URL", "yorigpt.example.com");
+    expect(() => getServerEnv("app")).toThrow(/APP_URL: must be an absolute http\(s\) URL/);
+    expect(() => getServerEnv("app")).not.toThrow(/yorigpt\.example\.com/);
+  });
+
+  it("trims surrounding whitespace instead of rejecting a pasted value", () => {
+    vi.stubEnv("APP_URL", "  http://localhost:3000  ");
+    expect(getServerEnv("app")).toEqual({ APP_URL: "http://localhost:3000" });
+    vi.stubEnv("DATABASE_URL", "  postgresql://user:secret@localhost:5432/yorigpt  ");
+    expect(getServerEnv("database").DATABASE_URL).toBe(
+      "postgresql://user:secret@localhost:5432/yorigpt",
+    );
+  });
+
   it("reports missing database configuration when requested", () => {
     vi.stubEnv("DATABASE_URL", undefined);
     expect(() => getServerEnv("database")).toThrow(/database.*DATABASE_URL/);
@@ -44,6 +73,61 @@ describe("server environment configuration", () => {
   it("rejects weak authentication secrets", () => {
     vi.stubEnv("AUTH_SECRET", "too-short");
     expect(() => getServerEnv("auth")).toThrow(/32 characters/);
+  });
+
+  it("ignores blank origin entries but still rejects a malformed origin", () => {
+    vi.stubEnv("AUTH_SECRET", "a".repeat(48));
+    vi.stubEnv("AUTH_TRUSTED_ORIGINS", "");
+    expect(getServerEnv("auth").AUTH_TRUSTED_ORIGINS).toEqual([]);
+
+    // A trailing comma or empty line in a deployment configuration means "none",
+    // exactly like blank entries in an API key list.
+    vi.stubEnv(
+      "AUTH_TRUSTED_ORIGINS",
+      " https://preview.example.com , ,https://*.e2b.app, ",
+    );
+    expect(getServerEnv("auth").AUTH_TRUSTED_ORIGINS).toEqual([
+      "https://preview.example.com",
+      "https://*.e2b.app",
+    ]);
+
+    // The failing entry is named by index, so a long list is still diagnosable.
+    vi.stubEnv("AUTH_TRUSTED_ORIGINS", "https://ok.example,preview.example.com");
+    expect(() => getServerEnv("auth")).toThrow(
+      /AUTH_TRUSTED_ORIGINS\.1: must be an absolute http\(s\) origin/,
+    );
+  });
+
+  it("reports a blank email configuration instead of an invalid URL", () => {
+    vi.stubEnv("SMTP_URL", "");
+    vi.stubEnv("EMAIL_FROM", "no-reply@example.invalid");
+    expect(() => getServerEnv("email")).toThrow(/SMTP_URL: is blank/);
+
+    vi.stubEnv("SMTP_URL", "smtp.example.invalid:587");
+    expect(() => getServerEnv("email")).toThrow(/SMTP_URL: must be an smtp:\/\/ or smtps:\/\/ URL/);
+
+    vi.stubEnv("SMTP_URL", "  smtps://user:password@smtp.example.invalid:465  ");
+    vi.stubEnv("EMAIL_FROM", "  no-reply@example.invalid  ");
+    expect(getServerEnv("email")).toEqual({
+      SMTP_URL: "smtps://user:password@smtp.example.invalid:465",
+      EMAIL_FROM: "no-reply@example.invalid",
+    });
+  });
+
+  it("falls back to the documented provider URLs when they are blank", () => {
+    // A stray `OPENROUTER_BASE_URL=` line means "not configured", never a crash.
+    vi.stubEnv("OPENROUTER_API_KEYS", "openrouter-test-key");
+    vi.stubEnv("OPENROUTER_BASE_URL", "");
+    expect(getServerEnv("openrouter").OPENROUTER_BASE_URL).toBe(
+      "https://openrouter.ai/api/v1",
+    );
+    vi.stubEnv("OPENROUTER_BASE_URL", "   ");
+    expect(getServerEnv("openrouter").OPENROUTER_BASE_URL).toBe(
+      "https://openrouter.ai/api/v1",
+    );
+    // A value that is present but unusable is still an error.
+    vi.stubEnv("OPENROUTER_BASE_URL", "openrouter.ai/api/v1");
+    expect(() => getServerEnv("openrouter")).toThrow(/OPENROUTER_BASE_URL/);
   });
 
   it("parses provider configuration without performing any requests", () => {

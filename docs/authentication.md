@@ -88,6 +88,13 @@ page guard was added, and conversations are still not linked to users. Only
 builds, typecheck, and unit tests run without SMTP credentials or a live database,
 and no test ever sends mail.
 
+`APP_URL` must be an absolute `http(s)` URL, scheme included; a missing, blank, or
+host-only value is reported with that distinction (`Invalid server configuration
+(app): APP_URL: …`) on the first auth or API request, not at startup. Every origin
+that serves the app other than `APP_URL`'s own must appear in
+`AUTH_TRUSTED_ORIGINS`, otherwise requests from it are rejected; see the
+troubleshooting note in `README.md`.
+
 ## Email verification and password reset behavior
 
 - Sign-up sends a verification link that redirects to

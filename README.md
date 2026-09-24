@@ -161,7 +161,11 @@ All configuration below is **server-only**:
 called**, for the selected scope, not on import. Call it inside the relevant
 server service, never at module scope or in the root layout. It rejects invalid
 URLs, missing credentials, short authentication secrets, and a key list with no
-usable entry (blank entries inside a list are ignored). Errors identify fields without
+usable entry (blank entries inside a list are ignored). Surrounding whitespace is
+trimmed from URL values, and a missing, blank, or malformed variable is reported as
+exactly that — `APP_URL: is not set`, `APP_URL: is blank`, or `APP_URL: must be an
+absolute http(s) URL, including the scheme` — instead of a bare `Invalid URL`.
+Errors identify fields without
 printing their values. Provider URLs have defaults and `OPENROUTER_MODEL` is optional;
 API keys have none. The current model is chosen from the server catalog
 (`src/server/ai/models/catalog.ts`), never by a reply request body; that entry
@@ -185,6 +189,39 @@ openssl rand -base64 32
 
 For public deployments, configure `APP_URL` to the HTTPS origin. The local default
 in the example file is not a production URL.
+
+The other provider URLs keep their documented defaults, so a stray
+`OPENROUTER_BASE_URL=` or `NVIDIA_BASE_URL=` line is treated as "not configured"
+rather than as a failure. A blank `AUTH_TRUSTED_ORIGINS` means "no extra origins",
+and a trailing comma or empty line inside either list is ignored.
+
+### Troubleshooting: `Invalid server configuration (app): APP_URL ...`
+
+`npm start` (or `npm run dev`) reports this on the first request that needs the app
+origin — any page that resolves a session, plus the auth and API routes — so the app
+is unusable until it is fixed. The response the browser gets is Next.js's generic
+error page; the actionable text is in the server log, once per request. Validation is
+deliberately lazy (`getServerEnv` runs inside the service that needs it), so a static
+build, the test suite, and unrelated tooling never require any of these variables,
+which is why the failure appears per request instead of at startup. It covers three
+distinct mistakes, each named in the message:
+
+- **No `.env` at all.** Environment files are not committed, so a fresh clone has
+  none: run `cp .env.example .env`. Restart the server afterwards — a running
+  process does not pick up a newly created or edited `.env`.
+- **A blank value.** `APP_URL=`, `APP_URL="  "`, or an empty variable injected by a
+  deployment platform is reported as *blank*. Fix the value, not the quoting.
+- **A value that is not an absolute URL.** `yorigpt.example.com` (no scheme),
+  `localhost:3000`, `$PUBLIC_ORIGIN` (an unexpanded reference), or a leftover
+  template placeholder must become `http://localhost:3000` or
+  `https://your-real-origin`.
+
+A host that is neither `APP_URL` nor listed in `AUTH_TRUSTED_ORIGINS` is a different
+failure: requests from it are rejected with `FORBIDDEN_ORIGIN`, and Better Auth
+refuses its callback URLs. Behind a preview proxy, an alias host, or a container
+port mapping, either set `APP_URL` to the origin users actually open (generated
+verification/reset links then point there as well) or keep `APP_URL` and add the
+extra origins, for example `AUTH_TRUSTED_ORIGINS=https://*.e2b.app`.
 
 ## Authentication foundation
 
@@ -237,6 +274,39 @@ Database commands:
   `sessions`, `accounts`, and `verifications` only.
 - `npm run db:migrate -- --name <name>` — future development schema changes only.
 - `DATABASE_TEST_URL=... npm run test:db` — opt-in checks against a disposable, migrated PostgreSQL database.
+
+### Troubleshooting: `The table public.users does not exist in the current database`
+
+The app starts, the static shell renders, but sign-in and registration answer `500`,
+and the server log shows `ERROR [Better Auth]`, `Invalid prisma.user.findFirst()
+invocation`, and `code: 'P2021'`. This is not a configuration error: `DATABASE_URL`
+reaches a real database that has **no tables**, because the committed migrations were
+never applied to it. A fresh hosted database (Neon, Supabase, RDS, a new compose
+volume) is empty even when migrations ran on your machine, and each environment needs
+them applied once:
+
+```sh
+npm run db:deploy   # prisma migrate deploy — applies every file in prisma/migrations
+npm run db:status   # shows the recorded migration history
+```
+
+Two traps in a production-style install:
+
+- **The `prisma` CLI is a devDependency.** If dependencies were installed with
+  `--omit=dev` (npm prints `npm warn config production Use --omit=dev instead`),
+  `npm run db:deploy` fails with `sh: 1: prisma: not found`. Install with dev
+  dependencies for the release step (`npm ci`), or run the pinned CLI on demand:
+  `npx prisma@6.19.3 migrate deploy`.
+- **Migrations need DDL rights.** Creating enums, tables, and constraints requires a
+  role with schema-owner rights on that database. The least-privilege role the server
+  runs as cannot apply them, so use a migration credential (for example as a release
+  command or one-off job) rather than the runtime one.
+
+To confirm the state without the CLI, ask PostgreSQL directly:
+`psql "$DATABASE_URL" -c "select to_regclass('public.users')"` prints `users` once the
+schema exists and an empty (`NULL`) value while the database is still unmigrated.
+Nothing about the failure is cached in the app, so requests succeed as soon as the
+migrations land — no rebuild is needed.
 
 **Sandbox limitation:** standard native Prisma commands still fail to download
 engines because TLS to `binaries.prisma.sh` is terminated. Validation, generation,
@@ -901,6 +971,37 @@ dependency, or runtime configuration was changed. A mocked route-to-provider-to-
 smoke test passes for OpenRouter rotation/failure and NVIDIA JSON, but no live provider
 was called. `DATABASE_TEST_URL` is unset; Playwright lists 81 tests but no browser
 executable is available, so neither DB integration nor Playwright was run for Task 24.
+
+**Environment-configuration fix verified end to end in this restricted sandbox
+(2026-09-24):** the Prisma client was generated by satisfying the CLI's schema-engine
+preflight with a stub path (the bundled WASM engine does the actual work; the native
+download still fails on TLS to `binaries.prisma.sh`). With the client present,
+`npm test` passes **711/711 across 50 files** (7 of them new: missing/blank/malformed
+`APP_URL`, whitespace trimming, origin-list entries, blank email and provider base
+URLs), and `npm run lint`, `npm run typecheck`, and `npm run build` pass. The built
+app was then served with `npm start` against disposable PostgreSQL 18.4 using the
+uncommitted local `.env`, with the committed migrations applied by executing
+`prisma/migrations/*/migration.sql` directly (native `migrate deploy`/`db:status`
+remain blocked by the same download limitation): `/` and `/login` answered 200,
+`/api/auth/sign-up/email` created the user, account, and session rows, and Better Auth
+answered 403 `INVALID_ORIGIN` for an unlisted origin while accepting one from
+`AUTH_TRUSTED_ORIGINS`. Serving with a blank `APP_URL` reproduced the reported failure
+and logged the new message (`APP_URL: is blank; …`) in place of `APP_URL: Invalid URL`.
+Playwright was not run (no browser executable); no live AI provider, SMTP server, or
+production database was contacted.
+
+**Unmigrated-database diagnosis verified in the same sandbox (2026-09-25):** two
+databases were served by the same build, one migrated and one left empty. Against the
+empty database, sign-in reproduced the report exactly — HTTP `500`,
+`Invalid prisma.user.findFirst() invocation`, `The table public.users does not exist in
+the current database`, `code: 'P2021'` — and the same query returned `null` (a normal
+"no such account") after the migration SQL was applied, with the endpoint answering
+`401` instead of `500` without a restart. `npm test` (711/711), `npm run lint`,
+`npm run typecheck`, and `npm run build` were re-run in the rebuilt sandbox and pass.
+The `--omit=dev` trap was reproduced directly: with the dev-only CLI removed,
+`npm run db:deploy` fails with `sh: 1: prisma: not found`, while
+`npx prisma@6.19.3 migrate deploy` resolves the pinned CLI (its engine download is
+blocked here by the same `binaries.prisma.sh` TLS limitation, not by the command).
 
 The following database and browser coverage was verified during earlier steps in an
 environment where the Prisma client and disposable PostgreSQL were available, not

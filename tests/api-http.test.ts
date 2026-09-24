@@ -46,6 +46,22 @@ describe("request origin checks for state-changing routes", () => {
     expect(isTrustedRequestOrigin(post({}))).toBe(true);
   });
 
+  it("reports an actionable APP_URL problem instead of a bare invalid URL", () => {
+    // This is the request-time symptom of a missing or malformed APP_URL: the pages
+    // render, then the first API/auth call fails with a configuration error. The
+    // message must say what to fix, since Next reports it as an opaque digest.
+    vi.stubEnv("AUTH_SECRET", SECRET);
+    // APP_URL is validated before anything else the route needs, so its message is
+    // the one the operator sees.
+    vi.stubEnv("APP_URL", undefined);
+    expect(() => trustedOrigins()).toThrow(/APP_URL: is not set/);
+    expect(() => trustedOrigins()).not.toThrow(/AUTH_SECRET/);
+    vi.stubEnv("APP_URL", "yorigpt.example.com");
+    expect(() => trustedOrigins()).toThrow(/APP_URL: must be an absolute http\(s\) URL/);
+    vi.stubEnv("APP_URL", "http://localhost:3000");
+    expect(trustedOrigins()).toEqual(["http://localhost:3000"]);
+  });
+
   it("normalizes stored origins and ignores unusable configuration", () => {
     configure({ trusted: "https://preview.example.com/" });
     expect(trustedOrigins()).toEqual(["http://localhost:3000", "https://preview.example.com"]);

@@ -207,6 +207,28 @@ npm run db:status
 npm run db:deploy            # safe no-op if already up to date
 ```
 
+Every environment needs this once: migrations applied on a development machine do not
+travel with `DATABASE_URL`, and a newly provisioned hosted database is empty. Skipping
+it is visible only at request time — pages render, then sign-in fails with `500` and
+`The table public.users does not exist in the current database` (`P2021` logged by
+Better Auth). The `prisma` CLI is a devDependency, so a `--omit=dev` install cannot
+run this step (`sh: 1: prisma: not found`); install dev dependencies for the release
+step or use `npx prisma@6.19.3 migrate deploy`. The migration credential needs
+schema-owner rights (least-privilege runtime roles cannot create types or tables).
+See the matching troubleshooting entry in `README.md`.
+
+### SSL mode and the pg warning
+
+A hosted `DATABASE_URL` often carries `?sslmode=require`. `pg` (used through
+`@prisma/adapter-pg`) currently treats `prefer`, `require`, and `verify-ca` as
+aliases for `verify-full` and logs a startup warning about that. The existing
+behavior is the strict one, so the warning is not a fault; v3 of
+`pg-connection-string`/v9 of `pg` will adopt libpq semantics instead, which are
+weaker. Make the intent explicit in the URL rather than relying on the alias:
+use `sslmode=verify-full` (strict, and stable across both versions), or
+`uselibpqcompat=true&sslmode=require` if libpq compatibility is genuinely wanted.
+Do not disable TLS for a remote database.
+
 For subsequent development schema changes, use a disposable development database
 and `npm run db:migrate -- --name descriptive_change`, review the generated SQL,
 commit it, regenerate the client, and recheck constraints. `migrate dev` needs
