@@ -57,6 +57,7 @@ vi.mock("../src/server/db/client", () => ({ getDb: () => fake.db }));
 const { isAiPetContext, resolveAiPetContext, toAiPetContext } = await import(
   "../src/server/ai/pet-context"
 );
+const { buildPetAiInstruction } = await import("../src/server/ai/pet-instruction");
 const { loadCompanion } = await import("../src/server/pets/service");
 const {
   DEFAULT_PET_ID,
@@ -279,6 +280,31 @@ describe("server-side resolution of the stored companion", () => {
     expect(JSON.stringify(context)).not.toContain("appearance");
     // Every read was scoped to the caller's own row.
     expect(fake.state.reads).toEqual([userId, userId]);
+  });
+
+  it("feeds four stored selections through the real context and instruction boundary", async () => {
+    const instructions = new Set<string>();
+    for (const [petId, personalityId] of [
+      ["yori-cat", "calm"],
+      ["ember-fox", "playful"],
+      ["ember-fox", "curious"],
+      ["yori-cat", "sleepy"],
+    ] as const) {
+      store(userId, petId, {
+        petAppearance: "night",
+        petPersonality: personalityId,
+        apiKey: "test-key-not-a-secret", // malformed extra preference cannot become a prompt
+      });
+      const context = await resolveAiPetContext({ id: userId });
+      expect(context.personality.id).toBe(personalityId);
+      const { systemInstruction } = buildPetAiInstruction(context);
+      instructions.add(systemInstruction);
+      for (const forbidden of [userId, petId, "night", "apiKey", "test-key-not-a-secret"])
+        expect(systemInstruction, forbidden).not.toContain(forbidden);
+    }
+    expect(instructions.size).toBe(4);
+    expect(new Set(fake.state.reads)).toEqual(new Set([userId]));
+    expect(fake.state.writes).toBe(0);
   });
 
   it("resolves the catalog default when nothing is stored", async () => {

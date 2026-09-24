@@ -28,8 +28,8 @@ export type PetPersonality = (typeof PET_PERSONALITIES)[number];
 
 /**
  * Behaviour tags a personality carries. A fixed, code-owned vocabulary so traits stay
- * comparable and machine-readable: they describe tendencies for future behavior tasks
- * to branch on, not prose to feed a model.
+ * comparable and machine-readable: the visual engine and the server-side AI style
+ * builder interpret the same tags, but raw catalog data is never sent as a prompt.
  */
 export const PET_PERSONALITY_TRAITS = [
   "gentle",
@@ -42,15 +42,15 @@ export const PET_PERSONALITY_TRAITS = [
 
 export type PetPersonalityTrait = (typeof PET_PERSONALITY_TRAITS)[number];
 
-/** How much movement a personality implies. A hint only; nothing animates it yet. */
+/** How much movement a personality implies; visual reactions and AI tone read the hint. */
 export const PET_PERSONALITY_MOTION_LEVELS = ["low", "medium", "high"] as const;
 
 export type PetPersonalityMotionLevel = (typeof PET_PERSONALITY_MOTION_LEVELS)[number];
 
 /**
- * Optional, deliberately tiny hooks for later behavior tasks. Nothing consumes these
- * yet, and they must stay small and code-owned: no prompt text, no asset or URL, no
- * arbitrary values a client could supply.
+ * Optional, deliberately tiny behavior hints. The visual reaction engine reads both;
+ * the server AI style builder reads motion level only to set expressiveness. They
+ * stay small and code-owned: no prompt text, asset, URL, or client-supplied prose.
  */
 export type PetPersonalityHints = {
   /** The state this personality tends toward when it has nothing to do. */

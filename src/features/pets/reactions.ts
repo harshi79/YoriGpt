@@ -20,12 +20,13 @@ import { isPetPersonality, type PetPersonalityDefinition } from "./types";
  * into a small temperament, and the temperament — never a personality id, and never
  * anything a client supplied — decides which existing state an event resolves to. Same
  * inputs, same output, every time: no randomness, no timers, no learning, no memory,
- * and no generated language. Nothing about a personality is sent to OpenRouter, put in
- * a prompt, or persisted at runtime.
+ * and no generated language. This engine sends no messages to either AI provider;
+ * the separate server-side instruction builder reads the same catalog metadata for
+ * response style without affecting any visual transition.
  *
  * The chat lifecycle reaches this engine through `CHAT_PHASE_REACTIONS` below, via the
  * small adapter in `features/chat/pet-reactions.ts`. That is the only caller with real
- * events behind it, and it changes nothing here: no OpenRouter, no prompt, no request,
+ * events behind it, and it changes nothing here: no provider, prompt, or request,
  * and no natural language enters this module from either direction.
  */
 

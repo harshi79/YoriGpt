@@ -262,8 +262,16 @@ describe("generating a reply", () => {
       "updatedAt",
     ]);
 
-    // The provider saw the stored conversation only — no ids, owners, or positions.
-    expect(provider.calls).toEqual([[{ role: "user", content: "Question?" }]]);
+    // The server prepends a short style instruction; history remains exactly the
+    // stored user turn, with no ids, owners, or positions in either message.
+    expect(provider.calls).toHaveLength(1);
+    const [instruction, ...history] = provider.calls[0];
+    expect(instruction).toMatchObject({
+      role: "system",
+      content: expect.stringMatching(/gentle|composed/i),
+    });
+    expect(instruction.content).not.toContain(alice.id);
+    expect(history).toEqual([{ role: "user", content: "Question?" }]);
 
     const stored = await db.message.findMany({
       where: { conversationId },
@@ -306,9 +314,11 @@ describe("generating a reply", () => {
       "ASSISTANT",
     ]);
     expect(body.messages.map((message) => message.position)).toEqual([0, 1, 2, 3]);
-    // The second request carried the whole stored history.
+    // The second request keeps the same server-owned instruction and carries the
+    // whole stored history after it, without persisting the instruction as a row.
     expect(provider.calls).toHaveLength(2);
-    expect(provider.calls[1]).toEqual([
+    expect(provider.calls[1][0]).toEqual(provider.calls[0][0]);
+    expect(provider.calls[1].slice(1)).toEqual([
       { role: "user", content: "First question" },
       { role: "assistant", content: "A stored assistant reply." },
       { role: "user", content: "Second question" },

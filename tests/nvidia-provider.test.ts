@@ -148,8 +148,9 @@ describe("NVIDIA request construction", () => {
     expect(Object.keys(body).sort()).toEqual(["messages", "model", "stream"]);
     expect(sent).not.toContain("position");
     expect(sent).not.toContain("createdAt");
-    // Nothing about a companion travels either: the pet context stops in the reply
-    // orchestration, so the request a provider receives is a model, turns, and a flag.
+    // The adapter adds no pet metadata or instructions on its own. This direct
+    // call supplied only conversation turns; the reply service prepends an instruction
+    // when generating on behalf of an authenticated account.
     for (const forbidden of [
       "pet",
       "personality",
@@ -161,6 +162,27 @@ describe("NVIDIA request construction", () => {
       "selectedPetKey",
     ])
       expect(sent, forbidden).not.toContain(forbidden);
+  });
+
+  it("passes a prebuilt system message through JSON and streaming unchanged", async () => {
+    configure();
+    const instruction = "Answer accurately in a gentle tone.";
+    const messages = [{ role: "system" as const, content: instruction }, ...turns];
+    const calls = stubFetch((request) =>
+      request.headers.get("accept") === "text/event-stream"
+        ? streamedResponse([chunkFrame("ok"), STREAM_DONE])
+        : completion("ok"),
+    );
+
+    await expect(generateReply(messages, withModel())).resolves.toBe("ok");
+    await collect(streamReply(messages, withModel()));
+
+    expect(calls).toHaveLength(2);
+    for (const request of calls) {
+      const body = (await request.clone().json()) as { messages: unknown };
+      expect(body.messages).toEqual(messages);
+      expect(JSON.stringify(body)).not.toContain("uiPreferences");
+    }
   });
 
   it("asks for a server-sent-event stream when streaming", async () => {

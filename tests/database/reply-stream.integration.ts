@@ -262,9 +262,15 @@ describe("streaming reply responses", () => {
       },
     });
 
-    // The provider received the stored history only, and the persisted row is
-    // exactly the accumulated text — nothing added, nothing partial.
-    expect(provider.calls[0]).toEqual([{ role: "user", content: "Hello there" }]);
+    // Only a server-owned instruction precedes the stored history. The persisted
+    // row is still exactly the accumulated assistant text — nothing added or partial.
+    const [instruction, ...history] = provider.calls[0];
+    expect(instruction).toMatchObject({
+      role: "system",
+      content: expect.stringMatching(/gentle|composed/i),
+    });
+    expect(instruction.content).not.toContain(alice.id);
+    expect(history).toEqual([{ role: "user", content: "Hello there" }]);
     expect(await messagesOf(conversationId)).toEqual([
       { conversationId, role: "USER", content: "Hello there", position: 0 },
       { conversationId, role: "ASSISTANT", content: "Streamed assistant answer", position: 1 },
@@ -298,7 +304,10 @@ describe("streaming reply responses", () => {
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = (await response.json()) as { message: { role: string; content: string } };
     expect(body.message).toMatchObject({ role: "ASSISTANT", content: "A stored assistant reply." });
-    expect(provider.calls).toEqual([[{ role: "user", content: "Hello there" }]]);
+    expect(provider.calls).toHaveLength(1);
+    const [instruction, ...history] = provider.calls[0];
+    expect(instruction.role).toBe("system");
+    expect(history).toEqual([{ role: "user", content: "Hello there" }]);
   });
 });
 

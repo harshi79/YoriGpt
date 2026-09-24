@@ -38,15 +38,15 @@ import { loadCompanion } from "../pets/service";
  * - the account: no user id, email, name, session, or conversation identifier;
  * - credentials: no API key, provider identifier, model key, or environment value.
  *
- * What remains is identity plus code-owned behavior metadata: enough for a future
- * task to let a reply acknowledge the companion, and nothing that identifies a person
- * or the server. The values are all catalog constants — a fixed id, a display name, a
- * closed trait vocabulary, and two optional hints — so the contract carries no
- * free-text field a client could have written and no prompt of any kind.
+ * What remains is identity plus code-owned behavior metadata, and nothing that
+ * identifies a person or the server. The values are catalog constants — a fixed id,
+ * a display name, a closed trait vocabulary, and two optional hints — so the contract
+ * carries no free-text field a client could have written and no prompt of any kind.
  *
- * This module resolves and shapes that context. It does **not** build a prompt, does
- * not call a provider, and does not decide whether any of it reaches one: the provider
- * adapter stays unaware of pets, preferences, and the database.
+ * This module still only resolves and shapes that context. `pet-instruction.ts`
+ * separately translates its trusted traits and hints into a short server-owned
+ * instruction; neither this resolver nor a provider adapter builds a pet prompt
+ * or sees the preferences row.
  */
 
 /** The companion itself: a stable catalog id and the name a person would use. */

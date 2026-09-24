@@ -108,9 +108,9 @@ describe("OpenRouter request construction", () => {
     ]);
     expect(JSON.stringify(body)).not.toContain("position");
     expect(JSON.stringify(body)).not.toContain("createdAt");
-    // Nothing about a companion travels either. The pet context is resolved by the reply
-    // orchestration and stops there, so the request a provider receives is exactly the
-    // one it received before that contract existed: a model, the turns, and the flag.
+    // The adapter does not add pet metadata or instructions on its own. This direct
+    // call supplied only conversation turns; the reply service prepends an instruction
+    // when generating on behalf of an authenticated account.
     const sent = JSON.stringify(body);
     expect(Object.keys(body).sort()).toEqual(["messages", "model", "stream"]);
     for (const forbidden of [
@@ -124,6 +124,27 @@ describe("OpenRouter request construction", () => {
       "selectedPetKey",
     ])
       expect(sent, forbidden).not.toContain(forbidden);
+  });
+
+  it("passes a prebuilt system message through JSON and streaming unchanged", async () => {
+    configure();
+    const instruction = "Answer accurately in a gentle tone.";
+    const messages = [{ role: "system" as const, content: instruction }, ...turns];
+    const calls = stubFetch((request) =>
+      request.headers.get("accept") === "text/event-stream"
+        ? streamedResponse([chunkFrame("ok"), STREAM_DONE])
+        : completion("ok"),
+    );
+
+    await expect(generateReply(messages)).resolves.toBe("ok");
+    await collect(streamReply(messages));
+
+    expect(calls).toHaveLength(2);
+    for (const request of calls) {
+      const body = (await request.clone().json()) as { messages: unknown };
+      expect(body.messages).toEqual(messages);
+      expect(JSON.stringify(body)).not.toContain("uiPreferences");
+    }
   });
 
   it("honours a configured base URL", async () => {

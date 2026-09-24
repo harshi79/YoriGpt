@@ -7,9 +7,14 @@ import "server-only";
  * parsing stays inside the adapter that owns it.
  */
 
-/** One conversational turn. Only a role and text — never ids, positions, or timestamps. */
+/**
+ * One provider message: role and text only, never ids or database records. Stored
+ * history contributes only `user` / `assistant`; the reply service alone prepends a
+ * `system` instruction built from the server-resolved AiPetContext. Neither the
+ * browser nor a stored SYSTEM row can create that instruction.
+ */
 export type ChatTurn = {
-  role: "user" | "assistant";
+  role: "system" | "user" | "assistant";
   content: string;
 };
 
